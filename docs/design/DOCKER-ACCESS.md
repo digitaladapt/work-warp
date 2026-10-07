@@ -170,9 +170,10 @@ modes: the network fails closed on access, the credential fails closed on
 authorisation, and neither is trusted to cover the other's mistake.
 
 > The topology (subtractive, two-container `lyra_backend`) is measured. The
-> reconnect result is measured. What is **untested** is the end state: that a
-> terminal on `lyra_api` cannot reach the proxy by any route I have not
-> considered.
+> reconnect result is measured. What was **untested** was the end state: that a
+> terminal on `lyra_api` cannot reach the proxy by any route not considered.
+> **Now measured** — see §10d. The session has no route to the proxy and no API
+> on either of its own bridges, against a working DNS path to five neighbours.
 
 **What this buys, and it is more than I previously claimed.** I said a VM was
 required, because endpoint filtering is not strong enough to hold host access.
@@ -512,20 +513,76 @@ now has a prerequisite it did not have.
 
 **Step 0 — prove the topology before writing the broker.** Half a day, and it
 falsifies the whole design if it fails. Four checks, and the second is the one
-that matters:
+that matters.
 
-1. Remove `lyra_backend` from `lyra-terminal`; add `lyra_api`; put a stock HTTP
-   echo on it. Confirm the echo answers and `lyra-dockerproxy:2375` does not.
-2. **Confirm the session cannot re-attach.** From inside the terminal, try
-   `docker network connect lyra_backend <self>` — and also confirm no route to
-   the proxy remains by any other name (aliases, a second network, a stale
-   `DOCKER_HOST`). The probe already showed `POST /networks/{id}/connect` is
-   forwarded when the proxy *is* reachable, so this is the check that decides
-   whether the removal is a boundary or a speed bump.
-3. **Remove the proxy credential from the session entirely.** The terminal should
-   hold a broker token and nothing the proxy accepts. Verify by calling the
-   proxy's `/_ping` from inside the session and expecting nothing useful — a
-   `200` here means a network mistake is no longer survivable.
+### 0a. What is already true — measured 2026-10-07 from inside the session
+
+Re-measured against the live stack, which turns out to be further along than this
+document assumed. Three of the four checks are already half-answered:
+
+- **The session *is* a container on the wire.** `hostname` is a container id, and
+  `GET /containers/lyra-terminal/json` resolves. The earlier probe ran from the
+  same place inside the terminal container, so its call to `/containers/{id}/top`
+  was the terminal naming *itself*. That is a sharper demonstration of the
+  problem than was written down: reads reached the host from this very container.
+- **`lyra_backend` already contains exactly two containers** — `lyra-dockerproxy`
+  and `lyra-terminal` — so §4's "subtractive" topology is not a proposal, it is
+  what is running. The work is deleting one membership.
+- **The proxy holds no credential.** It answers `200` to `/_ping`, `/version`,
+  `/info` and `GET /containers/lyra-terminal/json` with **no auth header at all**,
+  and identically with a bogus bearer. Its own config confirms it: `AUTH=0`, and
+  every `ALLOW_*/HTTP_*` family is `0`.
+- **Path filtering works and body filtering does not** — both confirmed live.
+  `GET /secrets`, `POST /build`, `POST /exec/{id}/start` are `403`;
+  `POST /networks/create` and `POST /containers/create` are `400`, i.e.
+  *forwarded* and merely malformed. `POST=1` is doing exactly what §1.2 says.
+
+Which means **check 3 does not test what it says it tests.** Calling the proxy's
+`/_ping` from the session returns `200` today — but that is not proof the terminal
+*presented* a credential, because the proxy accepts anonymous callers. A `200`
+here is currently ambiguous, and will remain ambiguous until the proxy is
+unreachable. So the order is: close the route, *then* a `200` becomes meaningful
+(and impossible), and a `connection refused` is the pass condition. As written,
+check 3 would report a false failure on a correctly configured stack.
+
+### 0b. The one thing that must change, and it is six lines of compose
+
+1. `lyra-terminal`: **remove `lyra_backend`**, add `lyra_api`.
+2. `lyra-terminal`: **remove the `DOCKER_HOST` line.** This is the step that was
+   missing. §4 asks for the terminal to be off the proxy's network; it does not
+   say to take away its address for the proxy. Leaving `DOCKER_HOST` set to a
+   hostname that now resolves nowhere leaves the Docker client pointed at a dead
+   name — which reads as "broken" rather than "removed", and invites someone to
+   fix it.
+3. Declare `lyra_api` (broker + terminal, and nothing else).
+4. `lyra-dockerproxy`: unchanged — `lyra_backend` alone.
+5. `ww-broker`, when it exists: `lyra_api` + `lyra_backend`.
+
+Two smaller decisions bundled in, because they are one-line edits and will not
+come back:
+
+- **Pin the proxy image.** The live container is
+  `tecnativa/docker-socket-proxy:v0.5.0`; the compose file says `:latest` and the
+  README already flags `← PIN ME`. Pin it to `v0.5.0`.
+- **Settle the network name, or change the file to match reality.** The live
+  network is `lyra_backend`; `deploy/compose.yaml` calls it `lyra-control`.
+  Renaming a live network touches running containers for no security gain, so the
+  cheaper and more honest fix is to edit the *file* to say `lyra_backend` and
+  delete the `name:` override. Reality is the fact; the file should agree with it.
+
+### 0c. The checks, rewritten so they can actually fail
+
+1. From inside the session: `lyra-dockerproxy` does not resolve, or resolves and
+   refuses. **Pass = no `200` and no route.** Not "the echo answers" — testing an
+   echo proves less than testing the proxy itself, and the proxy is right there.
+2. **Confirm the session cannot re-attach.** `docker network connect
+   lyra_backend <self>` must fail. This is still the check that decides whether
+   the removal is a boundary or a speed bump, and the `400` on
+   `POST /networks/{id}/connect` is why.
+3. Re-run check 1 *while holding the broker token*, so a network mistake cannot be
+   hidden by an absent credential. The two halves must fail independently:
+   network removal fails closed on access, the credential fails closed on
+   authorisation, and neither is allowed to be the only reason the other passes.
 4. Confirm the broker's port is *not* reachable from a `public` container
    (`task-loom` is the honest test, since it is the intended client and must
    therefore go through the broker's own auth rather than the network).
@@ -533,6 +590,61 @@ that matters:
 Only then does it make sense to write the broker, because checks 2 and 3 are what
 decide whether "the api is unreachable" or "the api is unusable" is the real
 constraint — and those lead to different code.
+
+### 0d. Post-rollout measurement — 2026-10-07, after the compose change landed
+
+The change was applied and the terminal rebooted onto the new topology. Measured
+from inside it, with controls, because one unreachable hostname proves nothing:
+
+| probe | result | establishes |
+|---|---|---|
+| `task-loom`, `context-shuttle`, `memory-draft`, `gitea`, `caddy` | resolve | positive control — on `public`, DNS works |
+| `definitely-not-a-container` | no answer | negative control — the test *can* fail |
+| `lyra-dockerproxy` | **no answer** | not on this network |
+| `172.18.0.1:2375`, `172.26.0.1:2375` | `000` | no API on either bridge the session is on |
+
+`DOCKER_HOST` is unset and `/var/run/docker.sock` is absent. `ww-run` is inert
+and fails *loudly and correctly* — exit `1`, `docker create failed (… check
+DOCKER_HOST)` — and `ww-run guard-test` still passes with no daemon present,
+which is the right property for a guard that must not depend on the socket.
+
+**Check 1: pass.** No `200`, and no route to anything that could answer with one.
+
+**Check 2: pass by construction, and that is a weaker claim than it sounds.**
+`docker network connect` now fails because there is no daemon to ask; on its own
+that would prove nothing. The load-bearing fact is check 1: re-attaching requires
+the API, and the API is unreachable from this network. The vector is closed by
+the same measurement that closes check 1, not by an independent test of the
+re-attach path.
+
+**Check 3: still open, and now unblocked.** It needs the broker token, which does
+not exist yet. It is the first check that can fail once the broker lands.
+
+### 0e. Where the broker's own code goes, and the one gap in the plan
+
+§6a gives the language and the idiom but never says where the broker's source
+lives, and this repo is not obviously the answer: `origin/main` contains eight
+files and **no PHP at all** — no `composer.json`, no `src/`, no Dockerfile. So
+the first commit of the broker is a bootstrap, and that is a shape decision rather
+than a detail.
+
+Two facts that settle part of it:
+
+- **The terminal container has no PHP.** Measured: `php: not found`,
+  `composer: not found`. So *developing* the broker inside this session is not
+  possible without a toolchain change — which is precisely the problem §6.1 of
+  `PLAN.md` says to solve with an image rather than with `sudo`.
+- **The broker is a service, not a script.** It holds the only Docker credential
+  and its deliverables are a FrankenPHP image and a compose service on
+  `lyra_api` + `lyra_backend`, not a binary someone runs by hand.
+
+The consequence worth deciding before the first line: **is the broker a second
+repo, or a `src/` in this one?** The design leans toward `src/` here — the broker
+and `ww-run` are two ends of one protocol, and §9 already reframes `ww-run` as the
+broker's client library, which is hard to keep coherent across repos — but it is a
+structure decision that should be made deliberately, against the `api-gateway`
+profile in `private/ci/docs/STRUCTURE-FOR-NEW-PROJECTS.md`, rather than inherited
+from whichever commit lands first.
 
 **Step 1 — the ledger + session record.** Unchanged from `PLAN.md` §6.2. Still
 the cheapest durable thing and still no Docker needed. `POST
