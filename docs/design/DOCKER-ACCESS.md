@@ -100,29 +100,79 @@ The point is not a new network. It is that **the session must not share a
 network with the proxy.** One hop, one narrow surface:
 
 ```
-   public                lyra-api              lyra-control
-   ──────                ────────              ────────────
-   lyra-webui            ww-broker ──────────── lyra-dockerproxy ──▶ dockerd
-   lyra-terminal ────────┘    ▲                 (2375, no other member)
-   (no lyra-control)          │
-                              └── the only thing the session can reach
+ public (32 members)      lyra_api (new, 2)      lyra_backend (2)
+ ───────────────────      ─────────────────      ────────────────
+ lyra-webui               ww-broker ──────────────▶ lyra-dockerproxy
+ task-loom                    ▲                     :2375
+ context-shuttle              │                          │
+ memory-draft                 │                          ▼
+ gitea, … (28 more)           │                    /var/run/docker.sock
+ lyra-terminal ───────────────┘                          │
+ (removed from lyra_backend)                             ▼
+                                                    dockerd (host)
 ```
 
-- `lyra-terminal`: `public` + **`lyra-api`** (and *not* `lyra-control`).
-- `ww-broker`: `lyra-api` + `lyra-control`. Holds the only route to the proxy.
-- `lyra-dockerproxy`: `lyra-control` only.
+Measured 2026-10-07, and it makes the change **subtractive**: `lyra_backend`
+today contains exactly two containers — `lyra-dockerproxy` and `lyra-terminal`.
+That is already the shape this design wants; the work is deleting one membership,
+not inventing a topology.
+
+- `lyra-terminal`: `public` + **`lyra_api`** — and *removed from* `lyra_backend`.
+- `ww-broker`: `lyra_api` + `lyra_backend`.
+- `lyra-dockerproxy`: `lyra_backend` alone.
+
+**Naming drift to fix:** `deploy/compose.yaml` calls this network `lyra-control`;
+the live host calls it `lyra_backend`. The compose file is the intent, the host is
+the fact, and they disagree. Worth reconciling before anyone edits a network name
+that turns out to describe nothing.
+
+A new `lyra_api` (broker + terminal, nothing else) rather than putting the broker
+on `public`: 32 containers sit on `public` — immich, jellyfin, vaultwarden,
+nextcloud, gitea, task-loom and the rest — and every one of them would otherwise
+be able to reach the broker. The broker is a new attack surface and it should be
+visible to exactly one client.
 
 A new `lyra-api` (broker + terminal, nothing else) rather than putting the broker
 on `public`: every service on `public` — jellyfin, immich, vaultwarden,
 nextcloud, gitea and the rest — would otherwise be able to reach the broker. The
 broker is a new attack surface and it should be visible to exactly one client.
 
-**Removing `lyra-control` from `lyra-terminal` is the single most important line
+**Removing `lyra_backend` from `lyra-terminal` is the single most important line
 in this document.** Without it, the broker is advisory, because the API is still
 one `curl` away.
 
-> Untested. This is a topology to try, not a measurement. It is also *simpler*
-> than what is in `compose.yaml` today, not more complex.
+**But it is necessary and not sufficient, and the probe proved how the two halves
+fail apart.** `POST /networks/{id}/connect` is **forwarded** through the proxy
+(`400`, not `403`) — so a session that still has a route to the proxy can re-add
+itself to `lyra_backend` in one request:
+
+```
+POST /networks/{id}/connect     -> 400  FORWARDED   ← the session can re-attach itself
+POST /networks/create           -> 400  FORWARDED
+```
+
+So the precise claim is not "unreachable therefore safe". It is:
+
+1. The network removal closes the path — *provided the session has no other
+   route*. It works because the re-attach request needs the very access being
+   removed. That is load-bearing, and it is why the removal must be complete
+   rather than almost-complete.
+2. Which means a **half-migration is silently equivalent to no migration**: one
+   forgotten network, one leftover route, and the session reconnects itself and
+   nothing anywhere reports a problem.
+3. Therefore the credential is the backstop. The session should hold **no token
+   the proxy accepts** — it authenticates to the broker, and only the broker
+   authenticates to Docker. Then a network mistake is survivable: an exposed
+   proxy still refuses a caller with nothing to present.
+
+Defence in depth here is not belt-and-braces, it is two *different* failure
+modes: the network fails closed on access, the credential fails closed on
+authorisation, and neither is trusted to cover the other's mistake.
+
+> The topology (subtractive, two-container `lyra_backend`) is measured. The
+> reconnect result is measured. What is **untested** is the end state: that a
+> terminal on `lyra_api` cannot reach the proxy by any route I have not
+> considered.
 
 **What this buys, and it is more than I previously claimed.** I said a VM was
 required, because endpoint filtering is not strong enough to hold host access.
@@ -210,12 +260,67 @@ The broker additionally never forwards:
 `/build` is interesting. The agent explicitly wants to build a project's real
 image. That is an *intended capability*, not an escape. So the broker keeps a
 build path — but in **scratch** form: session-scoped tag, `network` by enum,
-result disposable, and nothing it produces can be pushed. Dockerfile `FROM`
-therefore reaches whatever the local daemon already has, which is ~127 images
-including `alpine`, `caddy`, `postgres`, several Node and PHP bases. That is
-enough for the milestone-4 compose test harness and it is a strictly smaller
-grant than general registry access, so a registry allowlist is a deliberate
-deferral rather than an oversight.
+result disposable, and nothing it produces can be pushed.
+
+**Corrected: the "no new images" claim was wrong.** I wrote that `FROM` could
+only reach the ~127 images already on the daemon, and that this was a smaller
+grant than registry access. Measured:
+
+```
+POST /images/create?fromImage=ww-does-not-exist -> 404  FORWARDED
+POST /images/create?fromImage=alpine&tag=latest -> 200  FORWARDED, and it pulled
+```
+
+`POST: 1` forwards `/images/create`, which is the registry **pull** endpoint. So
+`--network` is the only control on what a `Dockerfile` can obtain, and the
+"scratch build" is network-dependent rather than access-dependent. Two
+consequences:
+
+- The build story needs its own answer, not an appeal to the local cache. A
+  `Dockerfile` with `FROM ghcr.io/anything` succeeds whenever `network` permits.
+- Since the broker holds the only connection to the proxy, it is also the point
+  at which a registry allowlist can be enforced — by refusing the pull and
+  requiring the image to be present. That is a *later* decision, but it should be
+  made deliberately rather than inherited from a wrong assumption.
+
+There is also a judgement call worth flagging rather than silently banking: a
+`FROM npmjs.com` style pull is *normal build behaviour* for the compose harness
+in §9, not an attack. So the default should probably be `network: session` for
+build (it is unusable otherwise) with the pull *logged*, not blocked.
+
+---
+
+## 6a. Language, and why the answer is PHP
+
+**PHP 8.5 on FrankenPHP, matching ContextShuttle.** Not a compromise — the right
+answer, for three reasons that a general-purpose service would get wrong.
+
+FrankenPHP is a Go web server with the PHP interpreter embedded, so the process
+is *already* long-lived and a Symfony application controls its own lifecycle.
+That is exactly the shape this broker needs:
+
+| Requirement | Idiom |
+|---|---|
+| Per-command timeout | `symfony/clock` + `symfony/lock` — both already in ContextShuttle's `composer.json` |
+| The TTL janitor | A `messenger`-style loop or `frankenphp` worker, **no cron and no second service** |
+| Concurrent, capped execs | `symfony/lock` as the semaphore replacing `WW_MAX_JOBS` |
+| Structured logs + request IDs | `monolog`, already configured |
+| Streamed command output | FrankenPHP supports streaming responses (the `RespondingStream` test helper in ContextShuttle exists precisely for this) |
+
+And the real argument is internal: **the broker is a gate.** It has an allowlist of
+operations and a scope policy. ContextShuttle already solves that problem five
+times over — `FolderGate`, `CalendarWriteGate`, `PennyTrackWriteGate`,
+`MemoryDraftGate` — with the same shape each time: a small service that decides
+what is permitted, a typed refusal when it is not, and a unit test per rule. That
+is the exact vocabulary this component needs, and reusing it means one reviewer
+reads one idiom across both repos. A Go broker would be *technically* simpler and
+organisationally worse.
+
+**The concrete lift:** `src/Tool/Docker/ExecTool.php` + `config/tools/`
+YAML + `config/services.yaml` wiring, in a repo laid out per
+`private/ci/docs/STRUCTURE-FOR-NEW-PROJECTS.md` at the `api-gateway` profile.
+Bootstrap and parametrisation are already solved; the new work is four gate
+classes and the container spec.
 
 ---
 
@@ -287,11 +392,29 @@ message*, not redundant work.
 Revised from `PLAN.md` §12, which is unchanged in substance — the ordering just
 now has a prerequisite it did not have.
 
-**Step 0 — prove the topology before writing the broker.** Remove
-`lyra-control` from `lyra-terminal`, add `lyra-api`, put a stock HTTP echo on it,
-and confirm from inside the session: the broker's port answers, and
-`lyra-dockerproxy:2375` does not. Half a day, and it falsifies the whole design
-if it fails.
+**Step 0 — prove the topology before writing the broker.** Half a day, and it
+falsifies the whole design if it fails. Four checks, and the second is the one
+that matters:
+
+1. Remove `lyra_backend` from `lyra-terminal`; add `lyra_api`; put a stock HTTP
+   echo on it. Confirm the echo answers and `lyra-dockerproxy:2375` does not.
+2. **Confirm the session cannot re-attach.** From inside the terminal, try
+   `docker network connect lyra_backend <self>` — and also confirm no route to
+   the proxy remains by any other name (aliases, a second network, a stale
+   `DOCKER_HOST`). The probe already showed `POST /networks/{id}/connect` is
+   forwarded when the proxy *is* reachable, so this is the check that decides
+   whether the removal is a boundary or a speed bump.
+3. **Remove the proxy credential from the session entirely.** The terminal should
+   hold a broker token and nothing the proxy accepts. Verify by calling the
+   proxy's `/_ping` from inside the session and expecting nothing useful — a
+   `200` here means a network mistake is no longer survivable.
+4. Confirm the broker's port is *not* reachable from a `public` container
+   (`task-loom` is the honest test, since it is the intended client and must
+   therefore go through the broker's own auth rather than the network).
+
+Only then does it make sense to write the broker, because checks 2 and 3 are what
+decide whether "the api is unreachable" or "the api is unusable" is the real
+constraint — and those lead to different code.
 
 **Step 1 — the ledger + session record.** Unchanged from `PLAN.md` §6.2. Still
 the cheapest durable thing and still no Docker needed. `POST
