@@ -152,7 +152,7 @@ not get a hostile-agent-proof one. I want you to be choosing that knowingly.
    ```bash
    docker run --rm --network lyra-control -e DOCKER_HOST=tcp://lyra-dockerproxy:2375 \
      -v /home/andrew/apps/lyra/terminal/work-warp/bin:/bin-w:ro \
-     alpine sh -c 'apk add -q docker-cli curl >/dev/null 2>&1; /bin-w/probe-guardrails.sh'
+     alpine sh -c 'apk add -q curl >/dev/null 2>&1; /bin-w/probe-guardrails.sh'
    ```
 
    Read the output before going further. `POST /build` and `POST /exec` blocked
