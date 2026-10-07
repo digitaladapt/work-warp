@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=../vendor/symfony/routing/Loader/schema/routing.schema.json
+
+# Attribute routes are loaded from the whole of src/, not just src/Controller/:
+# this project organises by domain (Health, Exec, Sessions), and a controller
+# belongs beside the thing it exposes.
+controllers:
+    resource:
+        path: ../src/
+        namespace: App\
+    type: attribute

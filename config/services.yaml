@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=../vendor/symfony/dependency-injection/Loader/schema/services.schema.json
+
+# This file is the entry point for all custom service configuration.
+
+parameters:
+    env(LOG_LEVEL): 'info'
+    env(LOCK_DSN): 'flock'
+    env(WW_DOCKER_HOST): ''
+    env(WW_TOKEN): ''
+    env(WW_IMAGE): 'workwarp-base:latest'
+    env(WW_MAX_CONCURRENCY): '2'
+    env(WW_TTL_GRACE): '300'
+
+    # The socket proxy the broker talks to. Readiness reports whether this is
+    # set at all; nothing dials it at boot, because a Docker daemon being down
+    # must not stop the broker from starting (the same rule the other services
+    # in this family follow for their upstreams).
+    docker_host: '%env(WW_DOCKER_HOST)%'
+
+    # The image command containers are created from. Configuration, never input.
+    command_image: '%env(WW_IMAGE)%'
+
+    # How many commands may run at once. Replaces ww-run's WW_MAX_JOBS, and
+    # enforced with a lock rather than counted, so it survives a restart.
+    max_concurrency: '%env(int:WW_MAX_CONCURRENCY)%'
+
+    # Seconds added to a command's own timeout to form the ww.ttl label: the
+    # backstop the janitor enforces when the broker did not reap its container.
+    ttl_grace: '%env(int:WW_TTL_GRACE)%'
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    # Classes in src/ are services; the ones that are not are listed below and
+    # excluded rather than left to fail at compile time.
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Kernel.php'
+            # Value objects. Their constructors take scalars, enums and lists by
+            # design — a typed request is not a service, and autowiring it would
+            # be a category error.
+            - '../src/Exec/'
+            - '../src/Session/'
+            - '../src/Docker/'
+
+    # Controllers are registered explicitly with the tag that lets their action
+    # arguments be resolved from the request.
+    App\Health\HealthController:
+        tags: ['controller.service_arguments']
+        arguments:
+            $dockerHost: '%docker_host%'

@@ -1,0 +1,15 @@
+# FrankenPHP app config for the work-warp broker.
+#
+# An API service: no templates, no assets, no browser sessions. The only HTTP
+# surface is the broker's own API plus the health endpoints.
+
+{
+	admin off
+}
+
+{$SERVER_NAME:localhost} {
+	root * public
+	encode zstd gzip
+
+	php_server
+}
