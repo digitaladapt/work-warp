@@ -170,9 +170,10 @@ modes: the network fails closed on access, the credential fails closed on
 authorisation, and neither is trusted to cover the other's mistake.
 
 > The topology (subtractive, two-container `lyra_backend`) is measured. The
-> reconnect result is measured. What is **untested** is the end state: that a
-> terminal on `lyra_api` cannot reach the proxy by any route I have not
-> considered.
+> reconnect result is measured. What was **untested** was the end state: that a
+> terminal on `lyra_api` cannot reach the proxy by any route not considered.
+> **Now measured** — see §10d. The session has no route to the proxy and no API
+> on either of its own bridges, against a working DNS path to five neighbours.
 
 **What this buys, and it is more than I previously claimed.** I said a VM was
 required, because endpoint filtering is not strong enough to hold host access.
@@ -589,6 +590,61 @@ come back:
 Only then does it make sense to write the broker, because checks 2 and 3 are what
 decide whether "the api is unreachable" or "the api is unusable" is the real
 constraint — and those lead to different code.
+
+### 0d. Post-rollout measurement — 2026-10-07, after the compose change landed
+
+The change was applied and the terminal rebooted onto the new topology. Measured
+from inside it, with controls, because one unreachable hostname proves nothing:
+
+| probe | result | establishes |
+|---|---|---|
+| `task-loom`, `context-shuttle`, `memory-draft`, `gitea`, `caddy` | resolve | positive control — on `public`, DNS works |
+| `definitely-not-a-container` | no answer | negative control — the test *can* fail |
+| `lyra-dockerproxy` | **no answer** | not on this network |
+| `172.18.0.1:2375`, `172.26.0.1:2375` | `000` | no API on either bridge the session is on |
+
+`DOCKER_HOST` is unset and `/var/run/docker.sock` is absent. `ww-run` is inert
+and fails *loudly and correctly* — exit `1`, `docker create failed (… check
+DOCKER_HOST)` — and `ww-run guard-test` still passes with no daemon present,
+which is the right property for a guard that must not depend on the socket.
+
+**Check 1: pass.** No `200`, and no route to anything that could answer with one.
+
+**Check 2: pass by construction, and that is a weaker claim than it sounds.**
+`docker network connect` now fails because there is no daemon to ask; on its own
+that would prove nothing. The load-bearing fact is check 1: re-attaching requires
+the API, and the API is unreachable from this network. The vector is closed by
+the same measurement that closes check 1, not by an independent test of the
+re-attach path.
+
+**Check 3: still open, and now unblocked.** It needs the broker token, which does
+not exist yet. It is the first check that can fail once the broker lands.
+
+### 0e. Where the broker's own code goes, and the one gap in the plan
+
+§6a gives the language and the idiom but never says where the broker's source
+lives, and this repo is not obviously the answer: `origin/main` contains eight
+files and **no PHP at all** — no `composer.json`, no `src/`, no Dockerfile. So
+the first commit of the broker is a bootstrap, and that is a shape decision rather
+than a detail.
+
+Two facts that settle part of it:
+
+- **The terminal container has no PHP.** Measured: `php: not found`,
+  `composer: not found`. So *developing* the broker inside this session is not
+  possible without a toolchain change — which is precisely the problem §6.1 of
+  `PLAN.md` says to solve with an image rather than with `sudo`.
+- **The broker is a service, not a script.** It holds the only Docker credential
+  and its deliverables are a FrankenPHP image and a compose service on
+  `lyra_api` + `lyra_backend`, not a binary someone runs by hand.
+
+The consequence worth deciding before the first line: **is the broker a second
+repo, or a `src/` in this one?** The design leans toward `src/` here — the broker
+and `ww-run` are two ends of one protocol, and §9 already reframes `ww-run` as the
+broker's client library, which is hard to keep coherent across repos — but it is a
+structure decision that should be made deliberately, against the `api-gateway`
+profile in `private/ci/docs/STRUCTURE-FOR-NEW-PROJECTS.md`, rather than inherited
+from whichever commit lands first.
 
 **Step 1 — the ledger + session record.** Unchanged from `PLAN.md` §6.2. Still
 the cheapest durable thing and still no Docker needed. `POST
