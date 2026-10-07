@@ -203,7 +203,8 @@ POST   /v1/reap                                        → janitor: stop past-TT
 GET    /healthz
 ```
 
-Every field is typed and bounded:
+Bodies are typed request objects, not scalar maps — see §5a for why, and for the
+full field table. Path parameters and `name`/`tag` are bounded:
 
 | Field | Permitted | Notes |
 |---|---|---|
@@ -211,13 +212,17 @@ Every field is typed and bounded:
 | `cmd` | array of strings | **arbitrary** — that is the point |
 | `timeout` | 1..14400 seconds, default 1800 | the broker kills at expiry |
 | `network` | `none` \| `session` | an enum. Nothing else means anything. |
+| `workdir` | string, inside the workspace | refused, not normalised, if it escapes |
+| `env` | map<string,string> | the *container's* env, declared explicitly, never inherited |
 | `stdin` | string, capped | optional |
 | `tag` | `[a-z0-9._-]{1,40}` | becomes `ww-<session>-<tag>` |
 
-There is deliberately no `env`, `mount`, `privileged`, `cap_add`, `user`,
-`entrypoint`, `hostname`, `label` or `name`-beyond-the-tag. `network: session`
-is the only thing that grants any reach, and it points at a network the broker
-created and named.
+There is deliberately no `mount`, `privileged`, `cap_add`, `user`, `entrypoint`,
+`hostname`, `label` or `name`-beyond-the-tag. `network: session` is the only thing
+that grants any reach, and it points at a network the broker created and named.
+`mount` is the one omission that is a *deferral* rather than a statement of
+impossibility — it needs its own gate, and that is a different decision from being
+unable to express it.
 
 Two design consequences to write down now, because they are cheap here and
 expensive later:
