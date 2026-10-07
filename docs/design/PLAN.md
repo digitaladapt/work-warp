@@ -307,6 +307,17 @@ it is not categorically safe. The categorically safe version is a VM per session
 (gVisor, or an Incus / Firecracker microVM), where the guest kernel is a separate
 kernel and container escapes cannot reach host root. That is a deployment change.
 
+**Corrected 2026-10-07, and the correction favours the broker.** The paragraph
+above assumed the session could reach the proxy and that only the VM could close
+that. It can be closed without a VM: the session and the proxy share
+`lyra-control`, so put the broker in between and take the session *off* that
+network. Docker access then stops being "filtered" and becomes *unreachable* —
+the agent cannot call the API at all, and the one service it can call cannot
+express `--privileged`. The VM still matters, for the threats the broker cannot
+touch (a container-escape CVE, or a bug in the broker itself); it is no longer
+the only thing standing between an agent and host root. See
+`DOCKER-ACCESS.md` §1 and §4.
+
 **`--privileged` nested dockerd is host root and this design does not use it.**
 The escape is to bind-mount the host rootfs, and any containment built inside is
 defeated by the privilege granted to get there.
@@ -501,3 +512,9 @@ the task-loom e2e in §9 becomes a normal operation rather than a manual one.
 | 2026-10-07 | Workspace = immutable base image + persistent volume. Disposable container per command. No pet container. |
 | 2026-10-07 | Multiple workspaces supported; migration, nesting and cross-workspace mounts are not. |
 | 2026-10-07 | The VM is the security wall; the broker is guardrails, not a boundary. |
+| 2026-10-07 | **Superseded in part** by measurement: the broker is built and holds the credential, and label-scoped ownership is *enforcement*, not guardrails. The VM's remaining job is escapes and broker bugs, not API access. |
+| 2026-10-07 | The session leaves `lyra-control`; broker gets its own network between terminal and proxy. Measured: they share `lyra-control` today, so the proxy's policy was advisory. |
+| 2026-10-07 | The socket proxy is retained as defence-in-depth *behind* the broker, not as the boundary. It cannot scope by label, filter bodies, or hold a clock. |
+| 2026-10-07 | The broker's API is designed so dangerous operations are unexpressible rather than refused: no field exists for privileged, mounts, caps, devices or arbitrary names. `cmd` stays arbitrary; the container is what is constrained. |
+| 2026-10-07 | `build` is an intended capability, so the broker keeps a scratch build path (session tag, disposable, unpushable) rather than blocking the endpoint. |
+| 2026-10-07 | The MCP surface is built last, over a settled broker API. |
