@@ -58,8 +58,17 @@ raw_api() {
 
 printf '\nDocker endpoint: %s\n\n' "${DOCKER_HOST:-<unset>}"
 
-if ! docker info >/dev/null 2>&1; then
-  printf '  \033[31mNo daemon reachable.\033[0m Nothing to probe.\n\n'
+# Reachability is tested with curl against DOCKER_HOST, not with `docker info`.
+# Requiring the docker CLI here would drag the multi-megabyte client into the
+# test container for a single gate, and would undo the point of the change
+# above: every other line of this file is now curl. The one dependency is curl.
+if ! command -v curl >/dev/null 2>&1; then
+  printf '  \033[31mcurl is missing.\033[0m This probe needs curl and nothing else.\n\n'
+  exit 1
+fi
+if ! raw_api GET /_ping; then
+  printf '  \033[31mNo daemon reachable.\033[0m Nothing to probe.\n'
+  printf '  Tried %s — got %s.\n\n' "${DOCKER_HOST:-<unset>}" "$LAST_CODE"
   exit 1
 fi
 
