@@ -12,6 +12,9 @@
 #
 # Usage:  ./probe-guardrails.sh            (uses $DOCKER_HOST)
 #         ./probe-guardrails.sh --with-create   also test the create path
+#
+# Needs `curl`. It no longer uses `docker api` — see raw_api below for why that
+# mattered. Set WW_API_PREFIX=/v1.44 to pin an explicit API version in the path.
 
 set -uo pipefail
 
@@ -22,6 +25,36 @@ pass() { printf '  \033[32mok\033[0m      %s\n' "$1"; }
 fail() { printf '  \033[31mREACHED\033[0m %s\n' "$1"; PROBLEMS=$((PROBLEMS+1)); }
 info() { printf '  ----    %s\n' "$1"; }
 PROBLEMS=0
+# Endpoints we POSITIVELY reached. A probe that cannot see a single success
+# cannot tell "blocked" from "could not ask" — see the gate before the summary.
+POSITIVE=0
+# Path prefix for API calls. Empty by default: the daemon accepts unversioned
+# paths, and the proxy's section filters match the path as written, so the
+# unversioned form is the one least likely to be wrongly filtered either way.
+API_PREFIX="${WW_API_PREFIX:-}"
+
+LAST_CODE=000
+# Raw request against the Docker API, replacing `docker api`.
+#
+# `docker api` is NOT a subcommand of the Docker CLI. Verified against 29.8.0:
+# `docker api /version` exits 1 with "unknown command". The original script used
+# it throughout, so EVERY endpoint — readable and forbidden alike — came back
+# non-zero, every forbidden path printed "blocked", and the probe reported a
+# clean board no matter what the proxy actually admitted. It could not fail.
+#
+# $1 = method, $2 = path. Returns 0 only on HTTP 2xx/3xx; LAST_CODE holds the
+# status either way, so a refusal reads as 403 (the proxy denied it) rather than
+# 000 (nothing answered) — a distinction the old script threw away.
+raw_api() {
+  local method="$1" path="$2" host
+  LAST_CODE=000
+  [ -n "${DOCKER_HOST:-}" ] || return 1
+  host="${DOCKER_HOST#tcp://}"
+  host="${host%%/*}"
+  LAST_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
+      -X "$method" "http://${host}${API_PREFIX}${path}" 2>/dev/null || echo 000)"
+  case "$LAST_CODE" in 2*|3*) return 0 ;; *) return 1 ;; esac
+}
 
 printf '\nDocker endpoint: %s\n\n' "${DOCKER_HOST:-<unset>}"
 
@@ -32,25 +65,43 @@ fi
 
 printf 'READ paths\n'
 for ep in version info containers/json images/json networks volumes; do
-  if docker api "/${ep}" >/dev/null 2>&1; then pass "GET /${ep}"; else info "GET /${ep} blocked"; fi
+  if raw_api GET "/${ep}"; then
+    POSITIVE=$((POSITIVE+1)); pass "GET /${ep}"
+  else
+    info "GET /${ep} blocked (${LAST_CODE})"
+  fi
 done
 
 printf '\nREAD paths that must be BLOCKED\n'
 # These are the ones that would leak other people's data, or hand out creds.
 for ep in secrets swarm configs plugins nodes services tasks; do
-  if docker api "/${ep}" >/dev/null 2>&1; then fail "GET /${ep}"; else pass "GET /${ep} blocked"; fi
+  if raw_api GET "/${ep}"; then fail "GET /${ep} — REACHED (${LAST_CODE})"; else pass "GET /${ep} blocked (${LAST_CODE})"; fi
 done
 
 printf '\nWRITE paths that must be BLOCKED\n'
 # Each of these is a way to escalate past the proxy without needing the socket.
-if docker api -X POST /build >/dev/null 2>&1; then fail "POST /build"; else pass "POST /build blocked"; fi
-if docker api -X POST /exec >/dev/null 2>&1; then fail "POST /exec (on some container)"; else pass "POST /exec blocked"; fi
+if raw_api POST /build; then fail "POST /build — REACHED (${LAST_CODE})"; else pass "POST /build blocked (${LAST_CODE})"; fi
+if raw_api POST /exec; then fail "POST /exec — REACHED (${LAST_CODE})"; else pass "POST /exec blocked (${LAST_CODE})"; fi
+# Whether the proxy gates on METHOD at all. If CONTAINERS is enabled and the
+# section ACL does not check the verb, a hostile caller can DELETE a neighbour —
+# the janitor is then not the only thing that can remove a container.
+# The target is a name that does not exist, so nothing can actually be deleted:
+# a 404 proves the request was FORWARDED and answered by the daemon, which is
+# the finding. Only 403 (proxy said no) or 000 (nothing answered) is a block.
+if raw_api DELETE "/containers/ww-probe-nonexistent-$$" || [ "$LAST_CODE" = 404 ]; then
+  fail "DELETE /containers/... forwarded (${LAST_CODE}) — the proxy does not gate on method"
+else
+  pass "DELETE /containers/... blocked (${LAST_CODE})"
+fi
 
 printf '\nSocket reachable from a browser-ish path?\n'
-if curl -s -m 3 http://lyra-dockerproxy:2375/version >/dev/null 2>&1; then
-  info "proxy answers plain HTTP on port 2375 (expected on the control network)"
+# Derived from DOCKER_HOST rather than hardcoding the proxy's name: a probe that
+# can only be run in one exact deployment is a probe that will not be run.
+_probe_host="${DOCKER_HOST#tcp://}"; _probe_host="${_probe_host%%/*}"
+if curl -s -m 3 "http://${_probe_host}:2375/_ping" >/dev/null 2>&1; then
+  info "proxy answers plain HTTP at ${_probe_host}:2375 (expected on the control network)"
 else
-  info "proxy does not answer plain HTTP (unexpected — check it started)"
+  info "proxy does not answer plain HTTP at ${_probe_host}:2375 (unexpected — check it started)"
 fi
 
 if [ "$WITH_CREATE" -eq 1 ]; then
@@ -87,6 +138,16 @@ if [ "$WITH_CREATE" -eq 1 ]; then
   else
     pass "host root bind mount blocked"
   fi
+fi
+
+# A probe that saw nothing succeed cannot be trusted about what it saw fail.
+# This gate is the real fix: without it, an unreachable or misconfigured
+# endpoint reads exactly like a perfectly locked-down one.
+if [ "$POSITIVE" -eq 0 ]; then
+  printf '\n\033[31mNo read path succeeded.\033[0m This probe cannot tell "blocked" from\n'
+  printf '"could not ask", so every result above is unknown rather than a pass.\n'
+  printf 'Check DOCKER_HOST, that the proxy is up, and that curl itself works.\n\n'
+  exit 2
 fi
 
 printf '\n'
