@@ -77,10 +77,19 @@ plainly than let a tidy diagram imply otherwise.
   proxy container — a stock image with no shell to read it with, and whose
   config lives in its own environment rather than in a file. That is the
   `OPEN_TERMINAL_API_KEY` exposure from `/proc/1/environ`, fixed for this path.
-- **Blast radius is capped.** `mem_limit`, `pids_limit`, `cap_drop: ALL`,
-  `no-new-privileges` on the proxy; `--memory`, `--cpus`, `--pids-limit` on every
-  command container. The host is shared, so a memory bomb in a proxy is your
-  calendar's problem too.
+- **Blast radius is partly capped.** Corrected 2026-10-07 against the running
+  container, because this bullet used to claim more than the compose file does.
+  Measured: `mem_limit` 128m and `pids_limit` 256 are **in force**. But
+  `CapDrop`, `CapAdd` and `SecurityOpt` are all **null**, and the proxy runs as
+  **root** — so there is no `cap_drop: ALL` and no `no-new-privileges`, and this
+  bullet previously said there were. The compose file is honest about this in its
+  own comments (both are deliberately commented out, because nginx needs
+  setuid/setgid/chown and because `read_only` was unverified); the README was
+  not. Command containers still get `--memory`, `--cpus` and `--pids-limit`.
+  Worth fixing, but not the same priority as the network change: `/var/run/docker.sock`
+  already means host root if this process is ever compromised, and dropped
+  capabilities do not change that. It is defence against a *different*, narrower
+  bug — a proxy CVE — which is real but second-order.
 - **The default is the safe one.** `ww-run` runs with `--network none` unless a
   human asked otherwise, and refuses `--privileged`, `--pid=host`, `--device`,
   host bind mounts and `--network public` outright. There is no override flag:
