@@ -234,6 +234,119 @@ expensive later:
 
 ---
 
+## 5a. The API shape: a typed object, and what we give back to ContextShuttle
+
+**Decision: WorkWarp's `exec` takes a typed object, and WorkWarp does not inherit
+ContextShuttle's current schema limitation.** Andrew's framing is right and mine was
+backwards. ContextShuttle was cited for the MCP plumbing — the `McpServerFactory`,
+the YAML-to-tool registration, the gate idiom — not as a ceiling on what this API
+may express.
+
+First, a correction to my own last message: I said ContextShuttle's schema is
+"scalar only". That overstated it, and the measured truth is more useful.
+`ToolDefinition::inputSchema()` does not restrict types at all — `type` is a free
+string and `items` is passed through as a nested `array<string, mixed>`. What it
+whitelists is the *keyword* list:
+
+```php
+foreach (['description','default','enum','format','items','pattern','minimum','maximum'] as $key)
+```
+
+So `type: object` with nested `items.properties` already survives today. What is
+absent is `properties`, `oneOf`, `minItems`, `maxItems`, `additionalProperties`.
+That is not architecture. **It is a twenty-line whitelist**, which is why the
+export in the other direction is worth doing rather than working around.
+
+### Why scalars are not merely inconvenient here
+
+Scalar-only is not a neutral constraint that costs us a little flexibility. It is
+a **security regression**, because the only way to express a command with arguments
+and a working directory in a scalar schema is to quote a command line back into a
+single string:
+
+```
+cmd: "cd packages/api && npm test"     ← what a scalar-only schema forces
+cmd: ["npm","test"], workdir: "packages/api"   ← what we actually want
+```
+
+The first form reintroduces shell-string parsing, and that is the mechanism by
+which `cmd` stops being "arbitrary but argument-safe" and becomes "whatever the
+quoting rules permit". The design deliberately keeps `cmd` as an argv array so
+arguments are never re-parsed. A schema that cannot carry an array would undo that
+in the name of consistency with a tool registry that has nothing to do with it.
+
+### The shape
+
+`exec` takes a real DTO with Symfony validation attributes, and the JSON Schema is
+**derived from it** rather than hand-written per tool:
+
+```jsonc
+POST /v1/sessions/refactor/exec
+{
+  "cmd":     ["npm","test"],
+  "timeout": 900,
+  "network": "none",
+  "workdir": "packages/api",
+  "env":     {"NODE_ENV":"test"},
+  "stdin":   null
+}
+```
+
+| Field | Type | Constraint |
+|---|---|---|
+| `cmd` | `list<string>` | **minItems 1**, each element non-empty. Arbitrary *as arguments*. |
+| `timeout` | `int` | 1..14400, default 1800 |
+| `network` | `enum` | `none` \| `session` — nothing else means anything |
+| `workdir` | `string` | must resolve **inside** the workspace volume; a path escaping it is refused, not normalised |
+| `env` | `map<string,string>` | keys `^[A-Za-z_][A-Za-z0-9_]*$`, capped count and value length |
+| `stdin` | `string` | capped bytes |
+
+Two notes on `env`, because it is newly expressible and therefore newly a
+decision. It is the *container's* environment, which is not the sensitive thing —
+the `CONTAINERS: 1` problem is the *host's* environment. But the broker must pass
+**only the caller's declared env and inherit nothing of its own**: the PHP process
+will be holding the Docker credential and the broker's own token, and an inherited
+environment leaking into a container the agent controls is exactly how a bound in
+one place becomes a hole in another. Explicit allow, never inheritance.
+
+`mounts` stays out for now, deliberately, and not because it is inexpressible —
+because it needs its own gate and its own decision. That is a different thing from
+not being able to express it, and the difference matters.
+
+### The export: better schema support in ContextShuttle
+
+Do this in two tiers, and do tier A now — it is small, it is immediately useful,
+and it makes the two repos meet at the same dialect instead of diverging.
+
+**Tier A (in ContextShuttle, ~20 lines plus tests).** Widen the keyword
+pass-through in `ToolDefinition::inputSchema()` to include `properties`,
+`additionalProperties`, `items` (already there), `minItems`, `maxItems` and
+`oneOf`. That alone lets a YAML tool declare a nested typed object, and its
+existing tools are unaffected because the new keys are optional. It also has an
+obvious first beneficiary: `cmd` as array-of-strings.
+
+**Tier B (only when a tool earns it).** A DTO-derived schema path, for tools
+complex enough that a PHP class with validation attributes reads better than YAML.
+WorkWarp's `ExecRequest` is the proof-of-concept for that path; if it turns out
+pleasant, ContextShuttle can adopt the pattern for `CreateTransactionTool` and
+`MemoryDraftTool`, which are its two most parameter-heavy tools and the ones whose
+current YAML is hardest to read.
+
+**One dialect, and a test that keeps it honest.** The convergence point is the
+output: valid JSON Schema (draft 2020-12), consumed identically by the MCP SDK and
+the REST/OpenAPI layer. The anti-drift mechanism should be a test that asserts the
+*published* schema actually validates a real call — ContextShuttle already has the
+seed of this in `tests/Unit/Mcp/ToolInputSchemaTest.php`, which checks schema
+*shape*; extending it to check that a valid payload validates and an invalid one
+is refused is what stops the two implementations drifting apart silently.
+
+**What not to do:** extract a shared schema package yet. Two consumers is the
+classic threshold at which interface extraction is premature, and both codebases
+are moving. Converge on the *output* first; extract once the shape has stopped
+changing. A shared package designed today would encode today's guess.
+
+---
+
 ## 6. Labelling is the *enforcement* mechanism, not decoration
 
 This is where the "may not touch the neighbours" requirement is actually met.
