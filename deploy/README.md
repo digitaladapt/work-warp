@@ -6,7 +6,7 @@ Two files and a script. Read this before applying any of it.
 |---|---|
 | `compose.yaml` | Your host stack, revised. **Diff it against `/home/user/compose.yaml` first** — two changes, both commented. |
 | `../bin/ww-run` | The sanctioned way to use Docker. Refuses the dangerous flags. |
-| `../bin/probe-guardrails.sh` | Measures what the proxy actually admits. Run it before trusting the prose. |
+| `../bin/probe-guardrails.sh` | Measures what the proxy actually admits. Run it before trusting the prose. Needs `curl`; its exit code is the verdict (0 clean, 1 escalation reached, 2 results unknown). |
 
 ---
 
@@ -53,8 +53,9 @@ mounting the socket directly: a command that goes looking for a socket will not
 find one.
 
 Measured, with comments and blank lines stripped: the diff is **27 added lines
-and 0 removed or modified**. It is purely additive, so nothing that is running
-today is altered — only added to.
+and 1 removed** — a trailing blank line, and nothing of substance. It is
+otherwise purely additive, so nothing that is running today is altered, only
+added to.
 
 ---
 
@@ -144,16 +145,23 @@ not get a hostile-agent-proof one. I want you to be choosing that knowingly.
    ```
 
 4. **Probe it from a throwaway container** on the control network, not from the
-   terminal yet, so a broken proxy cannot affect anything:
+   terminal yet, so a broken proxy cannot affect anything. Run this from the host
+   shell — the bind mount has to be a host path, and the scripts are in `bin/`,
+   not `deploy/bin/` (the path this step used to give):
 
    ```bash
    docker run --rm --network lyra-control -e DOCKER_HOST=tcp://lyra-dockerproxy:2375 \
-     -v "$PWD/deploy/bin:/bin-w" alpine sh -c 'apk add -q docker-cli curl >/dev/null 2>&1; /bin-w/probe-guardrails.sh'
+     -v /home/andrew/apps/lyra/terminal/work-warp/bin:/bin-w:ro \
+     alpine sh -c 'apk add -q docker-cli curl >/dev/null 2>&1; /bin-w/probe-guardrails.sh'
    ```
 
    Read the output before going further. `POST /build` and `POST /exec` blocked
    is the result you want; anything under "READ paths that must be BLOCKED"
-   showing `REACHED` means the variable list needs correcting.
+   showing `REACHED` means the variable list needs correcting. The exit code is
+   the verdict: **0** nothing found, **1** at least one escalation reached,
+   **2** no read path answered at all, so the results are unknown rather than
+   clean — check `DOCKER_HOST` and that curl works before reading anything into
+   a 2.
 
 ### Stage 2 — let the terminal use it. This restarts the container I live in.
 
