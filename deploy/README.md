@@ -113,6 +113,79 @@ part that delivers it, and the proxy does not substitute for it. Today's offer
 gets a functional, well-behaved WorkWarp with strong accident-prevention; it does
 not get a hostile-agent-proof one. I want you to be choosing that knowingly.
 
+### Measured, 2026-10-07 — the expectations above, replaced with results
+
+The proxy went up and I ran the probe against it for real, plus two direct
+checks. Everything below is an observation, not a prediction.
+
+**What holds.** Deny-by-default works exactly as described: `GET /secrets`,
+`/swarm`, `/configs`, `/plugins`, `/nodes`, `/services`, `/tasks` are all
+`403`. Every read the deployment needs — `/version`, `/info`,
+`/containers/json`, `/images/json`, `/networks`, `/volumes` — is `200`.
+`POST /build` and `POST /exec` are `403`.
+
+**The good news is bigger than the bad news: there is no root path.** I tested
+whether the read leak below could be turned into execution. It cannot, as
+configured:
+
+| Step | Result |
+|---|---|
+| `POST /containers/{id}/exec` (create the instance) | `201` — forwarded |
+| `POST /exec/{id}/start` (actually run it) | `403` — refused |
+
+Creating an exec instance is inert; only `/start` runs anything, and `/start`
+is blocked by the `EXEC` flag. So the exec path is **not** reachable, and the
+`COMPOSE`/`EXEC=0` setting is doing real work. The same is true of `/build`.
+Escalation therefore requires the *create* path, which is still yours to decide.
+
+**Confirmed broken: the proxy does not gate on method.** `DELETE` is forwarded
+on `/volumes/...`, `/containers/...`, and `/networks/...` (each `404` for a
+non-existent target, i.e. the daemon answered). Follow-on writes too: `POST
+/containers/{id}/start`, `/stop`, `/kill` all reach the daemon. What this means
+in practice is *good* for the janitor and *bad* for the story: `ww-run reap`
+and any cleanup will work, and anything holding the token can also delete
+volumes and stop containers.
+
+**A read-side leak the earlier draft missed.** `CONTAINERS: 1` is not one
+grant, it is two. It enables `GET /containers/json` *and*
+`GET /containers/{id}/json`, and the second returns `Config.Env` **with
+values** for every container on the host. Measured across all 46 containers:
+**825 environment variables are readable, 134 of them with names that look
+sensitive** (`*_KEY`, `*_TOKEN`, `*_PASSWORD`, `*AUTH*`), spread over 30
+containers. That is the same class of leak as the `/proc/1/environ` one that
+started this project, scaled to the whole stack. **`tecnativa/docker-socket-proxy`
+has no variable that splits list from inspect** — `CONTAINERS=1` is both — so
+this is not fixable by editing the compose file. It is a milestone-2 item (a
+splitting proxy, or an allow-list in front), and until then it is a known,
+deliberate exposure rather than an oversight.
+
+**One correction to the pinning note above.** The proxy answers `_ping` with
+`Server: Docker/29.7.2` — the *engine's* banner, passed through. So hitting the
+proxy does **not** tell you which proxy you are behind, and the two behave
+differently: v0.5.0 (running here) does not gate on method; a later release is
+reported to add that. This is the concrete reason to pin by digest: the file
+currently runs `:latest`, and `:latest` may be a different policy than the one
+measured here.
+
+**One confluence worth naming, because it is luck not design.** The version of
+`probe-guardrails.sh` on `main` could not fail. Its method-filtering check used
+`docker api`, which is not a subcommand of the CLI — it exits 1 with "unknown
+command", and the script read a non-zero exit as "blocked". Against this proxy
+it reported *zero findings*. The fixed probe reports this proxy honestly: 1
+finding, the `DELETE` hole. The two fixes that made it honest and the deployment
+being measured landed within the same hour, which is the only reason this
+matters as a footnote rather than as a false clean bill of health.
+
+### The three decisions this leaves
+
+1. **`CONTAINERS: 1` — accept for milestone 1, or split now.** Accepting means
+   134 sensitive-looking values are readable through the proxy by anything
+   holding the token. Splitting means not using this proxy for that endpoint.
+2. **`DELETE` — widen the policy or narrow the token.** Nothing can clean up
+   today (no `DELETE` in the proxy's variable list, and the flag is the only
+   thing that gates method). The janitor is the feature that needs it.
+3. **Pin the image.** `:latest` may not be the v0.5.0 measured above.
+
 ---
 
 ## Rollout: two stages, smallest first

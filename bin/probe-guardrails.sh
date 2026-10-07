@@ -106,11 +106,26 @@ fi
 printf '\nSocket reachable from a browser-ish path?\n'
 # Derived from DOCKER_HOST rather than hardcoding the proxy's name: a probe that
 # can only be run in one exact deployment is a probe that will not be run.
-_probe_host="${DOCKER_HOST#tcp://}"; _probe_host="${_probe_host%%/*}"
-if curl -s -m 3 "http://${_probe_host}:2375/_ping" >/dev/null 2>&1; then
-  info "proxy answers plain HTTP at ${_probe_host}:2375 (expected on the control network)"
+#
+# DOCKER_HOST carries host AND port (tcp://host:2375), so strip the scheme and
+# the path but keep the port. This previously kept the port and then appended
+# ":2375" again, giving "http://host:2375:2375", which is not a valid authority
+# — so the check reported "does not answer" even against a perfectly healthy
+# proxy. It was a false alarm in the one section whose job is reassurance.
+_probe_hostport="${DOCKER_HOST#tcp://}"; _probe_hostport="${_probe_hostport%%/*}"
+case "$_probe_hostport" in *:*) _probe_authority="$_probe_hostport" ;; *)
+  _probe_authority="${_probe_hostport}:2375" ;; esac
+if curl -s -m 3 "http://${_probe_authority}/_ping" >/dev/null 2>&1; then
+  info "proxy answers plain HTTP at ${_probe_authority} (expected on the control network)"
+  # The same surface carries a banner identifying the proxy. Worth printing:
+  # the engine's version tells you nothing about the *gatekeeper's*, and the two
+  # have different behaviour. (tecnativa v0.5.0 does not gate on method; a later
+  # release is reported to. So "which proxy am I behind?" is a real question.)
+  _probe_van="$(curl -sI -m 3 "http://${_probe_authority}/_ping" 2>/dev/null \
+    | tr -d '\r' | awk -F': ' 'tolower($1) == "server" { print $2 }')"
+  [ -n "$_probe_van" ] && info "gatekeeper identifies itself as: ${_probe_van}"
 else
-  info "proxy does not answer plain HTTP at ${_probe_host}:2375 (unexpected — check it started)"
+  info "proxy does not answer plain HTTP at ${_probe_authority} (unexpected — check it started)"
 fi
 
 if [ "$WITH_CREATE" -eq 1 ]; then
@@ -147,6 +162,26 @@ if [ "$WITH_CREATE" -eq 1 ]; then
   else
     pass "host root bind mount blocked"
   fi
+fi
+
+# The grant named CONTAINERS is not one capability but two: list, and *inspect*.
+# Inspect returns Config.Env with values, for every container on the host. This
+# is a read-side leak of the same kind the whole design exists to close — the
+# one that started this project was an API key visible in /proc/1 — so it is
+# worth reporting separately from "GET /containers/json works".
+#
+# No value is printed or stored here: the fact of reachability is the finding.
+printf '\nContainer inspect: does the read side leak what the socket would?\n'
+if raw_api GET "/containers/ww-probe-nonexistent-$$/json"; then
+  info "inspect answered 2xx for a container that cannot exist — proxy may be routing oddly"
+elif [ "$LAST_CODE" = 404 ] || [ "$LAST_CODE" = 400 ]; then
+  # 404 means the path was FORWARDED and the daemon answered. So inspect is
+  # reachable for any real id, and env values are readable for every container.
+  info "inspect is REACHABLE (${LAST_CODE}) — CONTAINERS: 1 grants it, and it"
+  info "        returns env values for all containers. See README: this is the"
+  info "        read-side decision, not an accident. Milestone 2 splits it."
+else
+  pass "inspect blocked (${LAST_CODE})"
 fi
 
 # A probe that saw nothing succeed cannot be trusted about what it saw fail.
