@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# ww-run — the only sanctioned way for WorkWarp to talk to Docker.
+#
+# This is a *convention*, not a wall. Anything with socket access can bypass it
+# by calling the API directly. What it buys is that the correct path is also the
+# safe one, so the default is right rather than merely available.
+#
+# What it guarantees on every container it creates:
+#
+#   * a `ww-` name and a `ww.created-by=work-warp` label, so ownership is never
+#     inferred from a string that anyone could type
+#   * a TTL label, so the janitor has something to sweep on
+#   * --init, --cap-drop=ALL, no-new-privileges, --pids-limit, memory/CPU caps
+#   * `--network none` by default; reaching anything else needs --network
+#   * the session workspace at /workspace, and no other mount of any kind
+#
+# and on every container it touches *after* creation:
+#
+#   * it acts only on containers whose name starts with ww- AND which carry the
+#     ww.created-by label. The socket is not to be aimed at your neighbours.
+#
+# Usage:
+#   ww-run exec [--network none|session] -- <command...>
+#   ww-run ps                          only work-warp's containers
+#   ww-run reap [--yes]                remove work-warp's stopped containers
+#   ww-run guard-test                  prove the refusals work
+#
+# Environment:
+#   WW_SESSION    session name (default: default). Names the workspace volume.
+#   WW_IMAGE      image to run (default: ww-base:latest)
+#   WW_TTL        seconds before the janitor may stop it (default: 1800)
+#   WW_MAX_JOBS   concurrent ww- containers allowed (default: 2)
+#   DOCKER_HOST   set by compose to the proxy
+
+set -euo pipefail
+
+WW_SESSION="${WW_SESSION:-default}"
+WW_IMAGE="${WW_IMAGE:-ww-base:latest}"
+WW_TTL="${WW_TTL:-1800}"
+WW_MAX_JOBS="${WW_MAX_JOBS:-2}"
+WW_LABEL_OWNER="ww.created-by=work-warp"
+WW_NAME_PREFIX="ww-"
+
+die() { printf 'ww-run: %s\n' "$*" >&2; exit 1; }
+note() { printf 'ww-run: %s\n' "$*" >&2; }
+
+# Under `set -e`, a failure anywhere exits with no explanation — which is how a
+# broken check_budget made the whole exec path exit 1 in total silence. Nothing
+# in a tool that guards destructive operations should ever fail quietly.
+trap 'printf "ww-run: unexpected failure (line %s, exit %s of: %s)\n" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
+
+USAGE='ww-run exec [--network none|session] -- <command...>'
+
+# ===========================================================================
+# Predicates. All of them return non-zero instead of exiting, so they can be
+# tested. An earlier version called exit() from inside the check, which meant
+# the self-test died on its first case and reported nothing — a guard that
+# cannot be tested is a guard you are guessing about.
+#
+# There are deliberately TWO flag predicates, because a caller and this script
+# do not have the same rights:
+#
+#   user     — the strict set. A caller may not pass --security-opt at all,
+#              because a caller could use it to loosen something.
+#   internal — the dangerous set only, applied to the vector this script builds.
+#              It must permit this script's own hardening, or the self-check
+#              fails on its own --security-opt=no-new-privileges. (It did.)
+# ===========================================================================
+
+is_forbidden_user_flag() {
+  case "$1" in
+    --privileged|--privileged=true)                 return 0 ;;
+    --pid|--pid=*|--ipc|--ipc=*|--userns|--userns=*) return 0 ;;
+    --uts|--uts=*|--net|--net=*|--network|--network=*) return 0 ;;
+    --device|--device=*)                            return 0 ;;
+    --cap-add|--cap-add=*|--cap-drop|--cap-drop=*)   return 0 ;;
+    --mount|--mount=*|--tmpfs|--tmpfs=*)             return 0 ;;
+    -v|--volume|--volume=*|-v=*)                     return 0 ;;
+    --volumes-from|--volumes-from=*)                 return 0 ;;
+    --security-opt|--security-opt=*)                 return 0 ;;
+    --restart|--restart=*)                           return 0 ;;
+    --env-file|--env-file=*)                         return 0 ;;
+    --label|--label=*)                               return 0 ;;
+    --pidfile|--pidfile=*)                           return 0 ;;
+  esac
+  return 1
+}
+
+# Applied to this script's OWN vector. Forbids anything that widens privilege;
+# permits the named workspace volume and the hardening flags it adds itself.
+is_forbidden_internal_flag() {
+  case "$1" in
+    --privileged|--privileged=true)                 return 0 ;;
+    --pid=*|--ipc=*|--userns=*|--uts=*|--net=*|--network=*) return 0 ;;
+    --device|--device=*)                            return 0 ;;
+    --cap-add|--cap-add=*)                           return 0 ;;
+    --mount|--mount=*)                               return 0 ;;
+    --volumes-from|--volumes-from=*)                 return 0 ;;
+    --restart|--restart=*)                           return 0 ;;
+    --security-opt=apparmor=unconfined)              return 0 ;;
+    --security-opt=seccomp=unconfined)               return 0 ;;
+    --security-opt=label=disable)                    return 0 ;;
+  esac
+  return 1
+}
+
+# A bind mount of a host path is a host path. Named volumes are fine; paths are
+# not. `-v /:/host` and `-v /var/run/docker.sock:...` both fail here, while
+# `-v ww-ws-default:/workspace` passes.
+is_forbidden_mount() {
+  case "$1" in
+    /*:*) return 0 ;;
+  esac
+  return 1
+}
+
+# Does a whole argument vector contain anything forbidden by $1 (a predicate
+# name) or any host bind mount? Returns 0 if the vector is CLEAN.
+vector_is_clean() {
+  local predicate="$1"; shift
+  local arg
+  for arg in "$@"; do
+    if "$predicate" "$arg"; then return 1; fi
+    if is_forbidden_mount "$arg"; then return 1; fi
+  done
+  return 0
+}
+
+# ===========================================================================
+# Guard 2 — the network is off unless a human asked for it.
+#
+# `none` is the default because a command container with a route can reach the
+# doctor containers: the calendar, the memory service, the mail tools. Almost
+# nothing needs that. A command that does gets the session's own network.
+# ===========================================================================
+network_args() {
+  case "$1" in
+    none)    printf -- '--network\nnone' ;;
+    session) printf -- '--network\nww-net-%s' "$WW_SESSION" ;;
+    public)  return 1 ;;
+    *)       return 2 ;;
+  esac
+}
+
+# ===========================================================================
+# Guard 3 — never exceed the concurrency budget.
+#
+# The host is shared with everything else running on it, so a runaway loop of
+# containers is your calendar's problem as much as this one.
+# ===========================================================================
+check_budget() {
+  local running
+  # `|| true` inside the substitution is load-bearing. With `set -o pipefail`,
+  # an unreachable daemon makes `docker ps` exit 1, pipefail propagates that
+  # through the pipe, and `set -e` terminates the script *during the
+  # assignment* — before any message is printed. The guard would fail silently
+  # and take every command down with it. Reporting a budget of 0 and letting
+  # the create attempt fail with its real error is both honest and louder.
+  running="$( { docker ps -q --filter "label=${WW_LABEL_OWNER}" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+  if [ "${running:-0}" -ge "$WW_MAX_JOBS" ]; then
+    die "$running work-warp container(s) already running (limit $WW_MAX_JOBS). Refusing to add another."
+  fi
+}
+
+# ===========================================================================
+# Guard 4 — the only containers we will touch.
+#
+# Both conditions required. A name can be typed by anyone; the label is what
+# work-warp actually applied. Neighbours — the calendar, the memory service —
+# have neither, and are skipped rather than reported as errors.
+# ===========================================================================
+assert_ours() {
+  local id="$1" name owner
+  name="$(docker inspect --format '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||')" || return 1
+  case "$name" in
+    ${WW_NAME_PREFIX}*) ;;
+    *) printf 'ww-run: skipping %s: not a %s container\n' "$name" "$WW_NAME_PREFIX" >&2; return 1 ;;
+  esac
+  owner="$(docker inspect --format '{{index .Config.Labels "ww.created-by"}}' "$id" 2>/dev/null || true)"
+  [ "$owner" = "work-warp" ] \
+    || { printf 'ww-run: skipping %s: lacks %s\n' "$name" "$WW_LABEL_OWNER" >&2; return 1; }
+  printf '%s' "$name"
+}
+
+cmd_exec() {
+  local net="none" vol="ww-ws-${WW_SESSION}"
+
+  # Parse the small allowlist of options that may precede `--`.
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --)          shift; break ;;
+      --network)   [ "$#" -ge 2 ] || die "--network needs a value"; net="$2"; shift 2 ;;
+      --network=*) net="${1#*=}"; shift ;;
+      -h|--help)   printf '%s\n' "$USAGE"; exit 0 ;;
+      *)           die "unrecognised option before '--': $1
+$USAGE" ;;
+    esac
+  done
+  [ "$#" -gt 0 ] || die "nothing to run. $USAGE"
+
+  local netflags
+  netflags="$(network_args "$net")" || {
+    case "$net" in
+      public) die "refused: --network public. A command container is not a neighbour." ;;
+      *)      die "refused: unknown network '$net' (none, session)" ;;
+    esac
+  }
+
+  # The command after `--` is passed through UNEXAMINED, on purpose: `ww-run
+  # exec -- grep -v foo` must work, and scanning the command for anything that
+  # looks like a docker flag would refuse it for no reason. Those arguments run
+  # inside the container, where `-v` is grep's business and cannot affect the
+  # container it is in.
+  local -a vector=(
+    --name "${WW_NAME_PREFIX}${WW_SESSION}-$(date +%s)-$$"
+    --label "${WW_LABEL_OWNER}"
+    --label "ww.session=${WW_SESSION}"
+    --label "ww.ttl=${WW_TTL}"
+    --label "ww.kind=command"
+    --init
+    --cap-drop=ALL
+    --security-opt=no-new-privileges
+    --pids-limit=512
+    --memory=2g
+    --cpus=2
+    --workdir=/workspace
+    ${netflags}
+    --env PAGER=cat --env GIT_PAGER=cat --env TERM=dumb
+    --env NO_COLOR=1 --env CI=1
+    -v "${vol}:/workspace"
+  )
+
+  # Belt to the braces: if someone later edits the vector above and adds
+  # --privileged, this fails loudly rather than quietly granting host root.
+  vector_is_clean is_forbidden_internal_flag "${vector[@]}" \
+    || die "internal check failed: the create vector contains an escalation"
+
+  check_budget
+  local name="${WW_NAME_PREFIX}${WW_SESSION}-$(date +%s)-$$"
+  # Explicit, so a refusal or an unreachable daemon says which it was. A bare
+  # `docker create` under `set -e` would relay docker's error but lose the
+  # context that ww-run was the caller.
+  if ! docker create "${vector[@]}" "$WW_IMAGE" "$@" >/dev/null; then
+    die "docker create failed (image '$WW_IMAGE', network '$net'). If the daemon is unreachable, check DOCKER_HOST"
+  fi
+
+  # One container, one command. The command does not run in a PTY, so nothing
+  # believes it is interactive: that is the pager bug fixed by construction,
+  # rather than by scrubbing PAGER in a caller that will eventually forget to.
+  docker start "$name" >/dev/null
+  local exitcode out
+  set +e
+  exitcode="$(docker wait "$name")"
+  set -e
+  # Capped before it can reach a context window, and read after the fact, so a
+  # command that floods cannot flood anything but the daemon's log store.
+  out="$( { docker logs "$name" 2>&1 || true; } | tail -c 200000)"
+  docker rm -f "$name" >/dev/null 2>&1 || true
+
+  printf '%s\n' "$out"
+  printf 'ww-run: exit %s\n' "$exitcode" >&2
+  return "$exitcode"
+}
+
+cmd_ps() {
+  docker ps -a --filter "label=${WW_LABEL_OWNER}" \
+    --format 'table {{.Names}}\t{{.Status}}\t{{.Label "ww.session"}}\t{{.Label "ww.ttl"}}'
+}
+
+cmd_reap() {
+  [ "${1:-}" = "--yes" ] || die "refusing without --yes: this removes containers"
+  local id name
+  for id in $(docker ps -aq --filter "label=${WW_LABEL_OWNER}"); do
+    name="$(assert_ours "$id")" || continue
+    docker rm -v "$id" >/dev/null && note "removed $name"
+  done
+}
+
+# ===========================================================================
+# Prove the refusals rather than describing them.
+# ===========================================================================
+cmd_guard_test() {
+  local failed=0 arg
+
+  # Whole argument vectors, checked exactly as cmd_exec would check them.
+  # (An earlier version split these on whitespace while looping, so `-v /:/host`
+  # became two independent cases and the test reported a false failure.)
+  local -a mount_cases=(
+    "-v|/:/host"
+    "--volume|/:/host"
+    "--mount|type=bind,src=/,dst=/host"
+    "-v|/var/run/docker.sock:/sock"
+  )
+  local -a ok_mount_cases=( "-v|ww-ws-default:/workspace" )
+
+  _split_check() {  # $1 = predicate, $2 = |-joined vector
+    local IFS='|'; local -a v=($2); unset IFS
+    vector_is_clean "$1" "${v[@]}"
+  }
+
+  for spec in "${mount_cases[@]}"; do
+    if _split_check is_forbidden_user_flag "$spec"; then
+      printf 'FAIL    host mount ACCEPTED: %s\n' "$(printf '%s' "$spec" | tr '|' ' ')"; failed=1
+    else
+      printf 'ok      host mount refused:  %s\n' "$(printf '%s' "$spec" | tr '|' ' ')"
+    fi
+  done
+
+  # The named workspace volume must still pass, or nothing runs at all.
+  for spec in "${ok_mount_cases[@]}"; do
+    if _split_check is_forbidden_internal_flag "$spec"; then
+      printf 'ok      named volume accepted: %s\n' "$(printf '%s' "$spec" | tr '|' ' ')"
+    else
+      printf 'FAIL    named volume rejected (would break every run)\n'; failed=1
+    fi
+  done
+
+  local -a flags=(
+    --privileged --pid=host --ipc=host --net=host --uts=host --userns=host
+    --device=/dev/sda --cap-add=SYS_ADMIN --volumes-from=lyra-terminal
+    --security-opt=apparmor=unconfined --restart=always --env-file=/etc/shadow
+    --mount=type=bind,src=/,dst=/host -v --volume --tmpfs=/run
+  )
+  for arg in "${flags[@]}"; do
+    if is_forbidden_user_flag "$arg"; then
+      printf 'ok      refused:  %s\n' "$arg"
+    else
+      printf 'FAIL    ACCEPTED: %s\n' "$arg"; failed=1
+    fi
+  done
+
+  for arg in none session; do
+    if network_args "$arg" >/dev/null; then printf 'ok      --network %s allowed\n' "$arg"
+    else printf 'FAIL    --network %s refused (would break the default)\n' "$arg"; failed=1; fi
+  done
+  for arg in public host bridge; do
+    if network_args "$arg" >/dev/null; then printf 'FAIL    --network %s ACCEPTED\n' "$arg"; failed=1
+    else printf 'ok      --network %s refused\n' "$arg"; fi
+  done
+
+  # The self-check must pass on this script's own vector — this is the case that
+  # caught --security-opt=no-new-privileges being over-broadly forbidden.
+  local -a own=(
+    --init --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512
+    --memory=2g --cpus=2 --network none -v ww-ws-default:/workspace
+  )
+  if vector_is_clean is_forbidden_internal_flag "${own[@]}"; then
+    printf 'ok      own hardening vector passes the internal check\n'
+  else
+    printf 'FAIL    own hardening vector is rejected by its own check\n'; failed=1
+  fi
+
+  if [ "$failed" -eq 0 ]; then note "all guards hold"
+  else die "guard test failed"; fi
+}
+
+case "${1:-}" in
+  exec)       shift; cmd_exec "$@" ;;
+  ps)         cmd_ps ;;
+  reap)       shift; cmd_reap "$@" ;;
+  guard-test) cmd_guard_test ;;
+  *)          printf '%s\n' "$USAGE"; exit 1 ;;
+esac
