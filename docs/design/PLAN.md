@@ -518,3 +518,5 @@ the task-loom e2e in §9 becomes a normal operation rather than a manual one.
 | 2026-10-07 | The broker's API is designed so dangerous operations are unexpressible rather than refused: no field exists for privileged, mounts, caps, devices or arbitrary names. `cmd` stays arbitrary; the container is what is constrained. |
 | 2026-10-07 | `build` is an intended capability, so the broker keeps a scratch build path (session tag, disposable, unpushable) rather than blocking the endpoint. |
 | 2026-10-07 | The MCP surface is built last, over a settled broker API. |
+| 2026-10-08 | Source lives in `src/` in this repo, not a second repo: the broker and `ww-run` are two ends of one protocol, and it is one application. |
+| 2026-10-08 | The exec cap is per **workspace**, not per session — the workspace is what contends. Today one session creates one workspace, so they coincide; they stop coinciding when a session may name an existing workspace. Enforced as a pool of file locks (N slots), because `FlockStore` is a mutex and a counter is a lie after a crash. |

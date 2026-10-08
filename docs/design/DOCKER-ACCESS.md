@@ -646,6 +646,79 @@ structure decision that should be made deliberately, against the `api-gateway`
 profile in `private/ci/docs/STRUCTURE-FOR-NEW-PROJECTS.md`, rather than inherited
 from whichever commit lands first.
 
+### 6b. The concurrency cap: what the unit is, and why the mechanism is a pool
+
+A step-2 amendment. §6a asked for "concurrent, capped execs" and named
+`symfony/lock` as the semaphore replacing `WW_MAX_JOBS`; it did not say what the
+cap is *of*. Two things had to be decided, and one of them turned out to be
+about the design rather than about the number.
+
+**1. The unit is the workspace, not the session.**
+
+`POST /v1/sessions` creates a session and its workspace together, so today a
+per-session cap and a per-workspace cap are indistinguishable. They come apart
+the moment sessions can share a workspace — which `PLAN.md` §6.3 already looks
+forward to, and which is the natural shape when a session's *work* changes while
+its *directory* should not. So the rule has to be stated in the form that stays
+true:
+
+> A workspace is the unit that has a budget. Its size is a property of the
+> workspace.
+
+What that buys, in the two cases that differ:
+
+| Case | Budgets | Why it is right |
+|---|---|---|
+| Two sessions share one workspace | **one**, shared | They share the volume, so they contend for the same disk and the same daemon; two budgets would let a shared workspace run twice as much work as a private one. |
+| One session, two workspaces | **two**, independent | The workspaces do not contend, and the second one should not wait on the first. |
+
+Nothing in the implementation depends on resolving this now: the pool is cached
+per capacity, so when capacity becomes a workspace property the resolution is
+what changes — the mechanism already works. What *would* have been expensive is
+writing "per session" into the API and discovering the difference later.
+
+**2. The mechanism is a pool of file locks, not a counter.**
+
+`FlockStore` has no capacity — it is `flock()` on a hashed filename, one lock per
+key, so it is a mutex and not a semaphore. Capacity is therefore **N distinct
+slots**, each its own lock, and "how many are running" is "how many slots are
+taken". A counter in a variable would be smaller and would be lying: after a
+crash it says four commands are running and nothing can say whether that is
+true. A slot is held by a file description in the kernel, so a dead holder is
+a free slot with no reconciliation step.
+
+Three details that are not obvious and were each worth measuring:
+
+- **Every reservation must be a fresh `Lock` object.** A `Lock` is re-entrant
+  with respect to itself: a second `acquire()` on the same object succeeds,
+  because the store reports it as already held by this token. Handing out one
+  cached `Lock` per slot let the first implementation exceed its own capacity —
+  it issued three reservations from a pool of two, while cross-process behaviour
+  was correct all along. Fresh objects make the same-process case go through the
+  same conflict path as a foreign process, so there is one mechanism rather than
+  two that have to agree.
+- **`Lock::isAcquired()` cannot answer "is this slot free".** It reports only on
+  the object you already hold. Asking whether a slot is available means
+  *acquiring it and letting go*, which is also why `available()` is for
+  reporting and never for deciding: the answer can change before the caller acts.
+- **`modify('+1.000 seconds')` is silently ignored.** PHP's relative date format
+  accepts fractional units and quietly does nothing with them, so a deadline
+  built that way never arrives and a caller that asked to wait gets an immediate
+  refusal instead. The wait is arithmetic on floats for that reason.
+
+**Not built, deliberately: a queue.** The default is to refuse immediately, with
+a message naming the capacity and saying the broker does not queue. A broker that
+silently queues has made the queue the caller's problem without telling them, and
+the caller cannot then distinguish "waiting" from "hung" — which is the exact
+confusion this design exists to remove. `reserve(wait: …)` exists for a caller
+that has decided to wait, and it is opt-in.
+
+**Scope limitation, stated so it is not assumed away:** flock is local to one
+machine, so two brokers running against one daemon would not share a budget.
+The design has exactly one broker, so this is not a gap — but it is the reason
+the cap is a property of the workspace and not of the daemon, and it would need
+revisiting before anyone ran a second broker.
+
 **Step 1 — the ledger + session record.** Unchanged from `PLAN.md` §6.2. Still
 the cheapest durable thing and still no Docker needed. `POST
 /v1/sessions/{name}/exec` wants somewhere to write its result.

@@ -20,8 +20,11 @@ parameters:
     # The image command containers are created from. Configuration, never input.
     command_image: '%env(WW_IMAGE)%'
 
-    # How many commands may run at once. Replaces ww-run's WW_MAX_JOBS, and
-    # enforced with a lock rather than counted, so it survives a restart.
+    # How many commands may run at once in one workspace. Replaces ww-run's
+    # WW_MAX_JOBS, and enforced as a pool of file locks rather than counted, so
+    # it is honest after a crash. Today one session creates one workspace, so
+    # this reads as a per-session cap; see DOCKER-ACCESS.md §6b for why the
+    # workspace is the unit and not the session.
     max_concurrency: '%env(int:WW_MAX_CONCURRENCY)%'
 
     # Seconds added to a command's own timeout to form the ww.ttl label: the
@@ -41,7 +44,9 @@ services:
             - '../src/Kernel.php'
             # Value objects. Their constructors take scalars, enums and lists by
             # design — a typed request is not a service, and autowiring it would
-            # be a category error.
+            # be a category error. Slots is registered explicitly below because
+            # it must be a single process-wide pool, not something the container
+            # is free to construct per injection.
             - '../src/Exec/'
             - '../src/Session/'
             - '../src/Docker/'
@@ -52,3 +57,21 @@ services:
         tags: ['controller.service_arguments']
         arguments:
             $dockerHost: '%docker_host%'
+
+    # The exec budget. Built by its static factory because a pool must be shared
+    # process-wide: slot locks are held for the whole lifetime of a command, and
+    # a pool constructed per request would give every slot back the moment the
+    # request ended. See DOCKER-ACCESS.md §6b.
+    #
+    # `public: true` on purpose, and not a mistake to tidy away. Symfony removes
+    # or inlines a private service that nothing references — and until `exec`
+    # lands, nothing does — so a private definition would not exist to be
+    # instantiated, and the wiring test could not assert that the capacity came
+    # from configuration. This is the PHP service container, not an HTTP surface:
+    # the only thing `public` costs is a `get()` someone could call from inside
+    # the process, which is where the broker's own code already runs.
+    App\Exec\Slots:
+        public: true
+        factory: ['App\Exec\Slots', 'of']
+        arguments:
+            - '%max_concurrency%'

@@ -34,7 +34,36 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - `.env.example`, `.env.test` and `.env.ci` with every variable documented
   inline; `.env` is never committed.
 
+### Added
+
+- **The exec budget, enforced by the filesystem rather than by a counter.**
+  `App\Exec\Slots` is a pool of N file locks — one slot per permitted concurrent
+  command — so "how many are running" is "how many slots are taken" and a
+  crashed holder frees its slot by the kernel closing a file descriptor. There
+  is nothing to reconcile after a restart, because nothing was ever counted in a
+  variable. `reserve()` refuses rather than queueing, with a message that says
+  so; waiting is opt-in.
+
+  The unit is the **workspace**, not the session. Today `POST /v1/sessions`
+  creates both together so they coincide, but a workspace is what contends for
+  disk and daemon, and two sessions sharing one should share one budget. See
+  `docs/design/DOCKER-ACCESS.md` §6b for the two cases and why the distinction
+  is cheap to honour now and expensive to retrofit.
+
 ### Fixed
+
+- `Slots` exceeded its own capacity on the first run. A `Lock` is re-entrant
+  with respect to itself — a second `acquire()` on the same object succeeds — so
+  handing out one cached `Lock` per slot issued three reservations from a pool
+  of two, while the cross-process behaviour was correct the whole time. Each
+  reservation now takes a fresh object, so the same-process case goes through
+  exactly the same conflict path a foreign process does.
+
+- A wait deadline built with `DateTimeImmutable::modify('+1.000 seconds')` never
+  arrived: PHP's relative date format accepts fractional units and silently
+  ignores them, so `reserve(wait: 5.0)` refused instantly instead of waiting.
+  Deadline arithmetic is on floats now, and the clock fake advances by epoch
+  seconds for the same reason.
 
 - `SessionName`'s pattern, the environment-key pattern and the numeric-timeout
   check all anchored with `$`, which in PCRE also matches before a trailing
