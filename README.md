@@ -20,9 +20,101 @@ everything else works across — durable, stretched over time, crossed once by e
 ephemeral command and then left alone.
 
 - Container prefix: `ww-`
-- Labels: `ww.session`, `ww.task`, `ww.ttl`, `ww.kind`
+- Labels: `ww.created-by`, `ww.session`, `ww.kind`, `ww.ttl`
+
+## The shape of it
+
+Three layers, with one rule: **state lives in the volume, never in a process.**
+
+| Layer | What it is | Lives for |
+|---|---|---|
+| Session | policy + identity + the ledger | months |
+| Workspace | a named volume, mounted at `/workspace` | as long as you want it |
+| Command | one ephemeral container per command | seconds to minutes |
+
+A session that lasts months cannot be a live process; long-lived processes leak.
+So the durable objects are the volume and the ledger, and every command is a
+fresh container that shares only the volume.
+
+## The broker
+
+The agent runs arbitrary commands but must not hold the Docker credential, so
+Docker is reached through a broker that holds it instead. The broker's API is
+built so that dangerous operations are **unexpressible rather than refused**:
+there is no field in which to put `--privileged`, a bind mount, a device, a
+capability, a host namespace, or an arbitrary container name. Not a denylist — a
+vocabulary that lacks the words.
+
+The second principle follows from the first: **constrain the container, not the
+command.** `cmd` is an arbitrary argv array, deliberately. What is fixed is
+everything the container is and can reach — no capabilities, a read-only rootfs,
+one mount, its own network namespace, a hard clock.
+
+Where it sits, and why each hop exists:
+
+```
+ public                    lyra_api                 lyra_backend
+ ───────────────────       ─────────────────        ────────────────
+ lyra-webui                lyra-terminal ────────▶  ww-broker ────▶ lyra-dockerproxy
+ task-loom                 ww-broker                                     │
+ context-shuttle, …                                                   dockerd
+```
+
+The session is **not** on the proxy's network. That is the load-bearing line:
+a session that could reach the proxy directly could re-attach itself with one
+request, and the broker would be advisory rather than enforced.
+
+### What the broker is, and is not
+
+It is **guardrails, not a boundary.** It stops accidents, namespaces resources,
+injects labels and TTLs, and makes a whole class of escalation unrepresentable.
+It is not a substitute for running the daemon in a VM, which is the layer that
+defends against a container-escape CVE or a bug in the broker itself.
 
 ## Status
 
-Planning. The design is in [`docs/design/PLAN.md`](docs/design/PLAN.md); nothing
-is implemented yet.
+**Design complete; broker bootstrap in progress.** The design — decisions,
+measurements and open questions — is in
+[`docs/design/PLAN.md`](docs/design/PLAN.md), with the Docker-access milestone in
+[`docs/design/DOCKER-ACCESS.md`](docs/design/DOCKER-ACCESS.md). Read those before
+changing anything.
+
+What exists today:
+
+- `bin/ww-run` — the sanctioned command path from a terminal with no daemon
+  route. Refuses the dangerous flags; stamps names and labels; reaps.
+- `bin/probe-guardrails.sh` — measures what the socket proxy actually admits,
+  rather than trusting prose about it.
+- `src/Exec/`, `src/Session/`, `src/Docker/` — the typed request vocabularies
+  and the one function that assembles a container-create payload, with the tests
+  that hold them to it.
+- `src/Health/` — liveness and readiness.
+- The FrankenPHP image, Caddy config, php.ini and entrypoint.
+- The full quality gate: php-cs-fixer, PHPStan (level 6, empty baseline),
+  PHPUnit, `composer audit`.
+
+What does not exist yet: the HTTP API (sessions, exec, build, ps, reap), the
+Docker client that turns a `ContainerSpec` into a real container, the janitor,
+and the MCP surface. See DOCKER-ACCESS.md §10 for the build order and §10e for
+the decisions still open.
+
+## Development
+
+```bash
+composer install
+composer lint && composer stan && composer test
+```
+
+All four must pass before a PR is mergeable. Quality gates run in CI via the
+shared workflow in `private/ci`; `composer audit` and a coverage floor are part
+of it.
+
+## Conventions
+
+The house rules — branch naming, the PR workflow, and what this repo's design
+rests on — are in [`AGENTS.md`](AGENTS.md). PHP 8.5, Symfony 8.1,
+`declare(strict_types=1)` everywhere.
+
+Prose in this repo is plain and specific. Prefer a verified observation over a
+plausible claim, and say plainly when something is an assumption rather than a
+finding. Where a claim was tested, say how.

@@ -1,0 +1,11 @@
+monolog:
+    handlers:
+        # JSON lines to stdout (12-factor). The broker is a service that a
+        # terminal, and later an MCP client, depends on; its logs are read by
+        # something that wants to grep them, so they are structured everywhere
+        # rather than only in production.
+        main:
+            type: stream
+            path: php://stdout
+            level: '%env(LOG_LEVEL)%'
+            formatter: monolog.formatter.json

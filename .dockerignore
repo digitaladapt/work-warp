@@ -1,0 +1,48 @@
+# .dockerignore — what the broker image does NOT need.
+#
+# The image needs src/, config/, public/, bin/, docker/ and the composer
+# manifests. Everything below is dev-only: documentation, local runtime state,
+# the test suite, and anything that could carry a secret into a layer.
+# config/ is never dockerignored (Guiding Light §6.3).
+
+# VCS & CI
+.git
+.gitignore
+.gitattributes
+.gitea
+.github
+.ci
+.phpunit.cache
+.php-cs-fixer.dist.php
+phpstan.neon.dist
+phpstan-baseline.neon
+.editorconfig
+rector.php
+
+# Local env — never bake secrets into images (Guiding Light §8.12)
+.env
+.env.local
+.env.local.php
+.env.*.local
+.env.dev
+.env.test
+host.env
+config/secrets/prod/prod.decrypt.private.php
+
+# Local runtime state
+var
+*.sqlite
+*.sqlite3
+*.db
+
+# Not image content
+tests
+vendor
+node_modules
+docs
+deploy
+compose.yaml
+Dockerfile
+.dockerignore
+.php-version
+*.md

@@ -1,0 +1,21 @@
+# see https://symfony.com/doc/current/reference/configuration/framework.html
+framework:
+    secret: '%env(APP_SECRET)%'
+
+    # No session, deliberately. This is an API service: a caller presents a
+    # token, not a cookie, and nothing about the broker survives a request.
+    # Flex enables sessions by default; the machinery is removed here because it
+    # has no caller, not because it changes any header.
+    #
+    # Measured, not assumed: removing the session does NOT change Cache-Control.
+    # Symfony's ResponseHeaderBag appends ", private" to any response carrying
+    # cache directives without an explicit public/private/s-maxage. The health
+    # endpoints therefore send "no-store, private" — see the test that asserts
+    # what is actually declared rather than an exact string.
+
+    #esi: true
+    #fragments: true
+
+when@test:
+    framework:
+        test: true

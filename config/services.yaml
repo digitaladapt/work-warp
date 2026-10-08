@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=../vendor/symfony/dependency-injection/Loader/schema/services.schema.json
+
+# This file is the entry point for all custom service configuration.
+
+parameters:
+    env(LOG_LEVEL): 'info'
+    env(LOCK_DSN): 'flock'
+    env(WW_DOCKER_HOST): ''
+    env(WW_TOKEN): ''
+    env(WW_IMAGE): 'workwarp-base:latest'
+    env(WW_MAX_CONCURRENCY): '2'
+    env(WW_TTL_GRACE): '300'
+
+    # The socket proxy the broker talks to. Readiness reports whether this is
+    # set at all; nothing dials it at boot, because a Docker daemon being down
+    # must not stop the broker from starting (the same rule the other services
+    # in this family follow for their upstreams).
+    docker_host: '%env(WW_DOCKER_HOST)%'
+
+    # The image command containers are created from. Configuration, never input.
+    command_image: '%env(WW_IMAGE)%'
+
+    # How many commands may run at once in one workspace. Replaces ww-run's
+    # WW_MAX_JOBS, and enforced as a pool of file locks rather than counted, so
+    # it is honest after a crash. Today one session creates one workspace, so
+    # this reads as a per-session cap; see DOCKER-ACCESS.md §6b for why the
+    # workspace is the unit and not the session.
+    max_concurrency: '%env(int:WW_MAX_CONCURRENCY)%'
+
+    # Seconds added to a command's own timeout to form the ww.ttl label: the
+    # backstop the janitor enforces when the broker did not reap its container.
+    ttl_grace: '%env(int:WW_TTL_GRACE)%'
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    # Classes in src/ are services; the ones that are not are listed below and
+    # excluded rather than left to fail at compile time.
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Kernel.php'
+            # Value objects. Their constructors take scalars, enums and lists by
+            # design — a typed request is not a service, and autowiring it would
+            # be a category error. Slots is registered explicitly below because
+            # it must be a single process-wide pool, not something the container
+            # is free to construct per injection.
+            - '../src/Exec/'
+            - '../src/Session/'
+            - '../src/Docker/'
+
+    # Controllers are registered explicitly with the tag that lets their action
+    # arguments be resolved from the request.
+    App\Health\HealthController:
+        tags: ['controller.service_arguments']
+        arguments:
+            $dockerHost: '%docker_host%'
+
+    # The exec budget. Built by its static factory because a pool must be shared
+    # process-wide: slot locks are held for the whole lifetime of a command, and
+    # a pool constructed per request would give every slot back the moment the
+    # request ended. See DOCKER-ACCESS.md §6b.
+    #
+    # `public: true` on purpose, and not a mistake to tidy away. Symfony removes
+    # or inlines a private service that nothing references — and until `exec`
+    # lands, nothing does — so a private definition would not exist to be
+    # instantiated, and the wiring test could not assert that the capacity came
+    # from configuration. This is the PHP service container, not an HTTP surface:
+    # the only thing `public` costs is a `get()` someone could call from inside
+    # the process, which is where the broker's own code already runs.
+    App\Exec\Slots:
+        public: true
+        factory: ['App\Exec\Slots', 'of']
+        arguments:
+            - '%max_concurrency%'
