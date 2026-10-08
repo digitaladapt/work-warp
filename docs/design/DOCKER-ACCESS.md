@@ -13,7 +13,8 @@ explicitly labelled as untested.
 
 **The socket proxy cannot be the boundary, and the reason is not its policy
 granularity.** It is that the session can reach the proxy directly. From
-`deploy/compose.yaml`, measured:
+`deploy/compose.yaml`, measured (the *pre-rollout* file — it has since gone
+through §10b, so the network names in the snippet below are historical):
 
 ```
 lyra-terminal   networks: [public, lyra-control]
@@ -96,6 +97,12 @@ layer up.
 
 ## 4. Network topology — the actual change
 
+**Half-landed.** The terminal half is done (2026-10-07): `lyra-terminal` is on
+`public` + `lyra_api` and off `lyra_backend`, with `DOCKER_HOST` removed. The
+broker half is not: `ww-broker` does not exist yet, so nothing on `lyra_backend`
+reaches `lyra_api` and the proxy currently has no client at all. The diagram is
+the target shape, and it is the shape the current file is written for.
+
 The point is not a new network. It is that **the session must not share a
 network with the proxy.** One hop, one narrow surface:
 
@@ -121,10 +128,12 @@ not inventing a topology.
 - `ww-broker`: `lyra_api` + `lyra_backend`.
 - `lyra-dockerproxy`: `lyra_backend` alone.
 
-**Naming drift to fix:** `deploy/compose.yaml` calls this network `lyra-control`;
-the live host calls it `lyra_backend`. The compose file is the intent, the host is
-the fact, and they disagree. Worth reconciling before anyone edits a network name
-that turns out to describe nothing.
+**Naming drift, resolved 2026-10-08.** `deploy/compose.yaml` used to call this
+network `lyra-control`; the live host calls it `lyra_backend`. The file was
+edited to agree with reality (declaring `backend` and `api`, which resolve to
+`lyra_backend` and `lyra_api` under project name `lyra`), because renaming a
+live network touches running containers for no security gain. The applied file
+is preserved in the repo as the fact, per `deploy/README.md`.
 
 A new `lyra_api` (broker + terminal, nothing else) rather than putting the broker
 on `public`: 32 containers sit on `public` — immich, jellyfin, vaultwarden,
@@ -547,6 +556,10 @@ check 3 would report a false failure on a correctly configured stack.
 
 ### 0b. The one thing that must change, and it is six lines of compose
 
+**Applied 2026-10-07, reconciled into the repo 2026-10-08.** The steps below are
+kept as the record of the change; the file in this repo now states the same
+values they produced.
+
 1. `lyra-terminal`: **remove `lyra_backend`**, add `lyra_api`.
 2. `lyra-terminal`: **remove the `DOCKER_HOST` line.** This is the step that was
    missing. §4 asks for the terminal to be off the proxy's network; it does not
@@ -558,17 +571,18 @@ check 3 would report a false failure on a correctly configured stack.
 4. `lyra-dockerproxy`: unchanged — `lyra_backend` alone.
 5. `ww-broker`, when it exists: `lyra_api` + `lyra_backend`.
 
-Two smaller decisions bundled in, because they are one-line edits and will not
-come back:
+Two smaller decisions bundled in, both since landed:
 
-- **Pin the proxy image.** The live container is
-  `tecnativa/docker-socket-proxy:v0.5.0`; the compose file says `:latest` and the
-  README already flags `← PIN ME`. Pin it to `v0.5.0`.
-- **Settle the network name, or change the file to match reality.** The live
-  network is `lyra_backend`; `deploy/compose.yaml` calls it `lyra-control`.
-  Renaming a live network touches running containers for no security gain, so the
-  cheaper and more honest fix is to edit the *file* to say `lyra_backend` and
-  delete the `name:` override. Reality is the fact; the file should agree with it.
+- **Pin the proxy image — done as `v0.5.0`.** The live container was
+  `tecnativa/docker-socket-proxy:v0.5.0`; the compose file said `:latest` and the
+  README flagged `← PIN ME`. The file now carries `v0.5.0`, the version every
+  measurement was taken against. Resolving the tag to a digest is the stricter
+  form of the same pin, left as a one-off for whoever is next at the host.
+- **Settle the network name — done by changing the file to match reality.** The
+  live network is `lyra_backend`; `deploy/compose.yaml` now declares `backend`
+  and `api` (no `name:` override), which resolve to `lyra_backend` and
+  `lyra_api` under project name `lyra`. Reality is the fact; the file agrees
+  with it.
 
 ### 0c. The checks, rewritten so they can actually fail
 
@@ -622,6 +636,10 @@ not exist yet. It is the first check that can fail once the broker lands.
 
 ### 0e. Where the broker's own code goes, and the one gap in the plan
 
+**Resolved 2026-10-08: the broker is a `src/` in this repo** (PLAN.md decision
+log). The reasoning below is the record of why; the answer it leans toward is the
+answer that landed.
+
 §6a gives the language and the idiom but never says where the broker's source
 lives, and this repo is not obviously the answer: `origin/main` contains eight
 files and **no PHP at all** — no `composer.json`, no `src/`, no Dockerfile. So
@@ -630,21 +648,22 @@ than a detail.
 
 Two facts that settle part of it:
 
-- **The terminal container has no PHP.** Measured: `php: not found`,
-  `composer: not found`. So *developing* the broker inside this session is not
-  possible without a toolchain change — which is precisely the problem §6.1 of
-  `PLAN.md` says to solve with an image rather than with `sudo`.
+- **The terminal container had no PHP.** Measured at the time: `php: not found`,
+  `composer: not found`. That was resolved on 2026-10-08 — PHP 8.5.11 and
+  Composer were re-installed (`~/install-php85.sh`), so the broker can be
+  developed here after all. The `intl` extension was the one gap in that script
+  and was installed alongside; it is the extension §6.1's "just add `intl`"
+  example names.
 - **The broker is a service, not a script.** It holds the only Docker credential
   and its deliverables are a FrankenPHP image and a compose service on
   `lyra_api` + `lyra_backend`, not a binary someone runs by hand.
 
-The consequence worth deciding before the first line: **is the broker a second
-repo, or a `src/` in this one?** The design leans toward `src/` here — the broker
-and `ww-run` are two ends of one protocol, and §9 already reframes `ww-run` as the
-broker's client library, which is hard to keep coherent across repos — but it is a
-structure decision that should be made deliberately, against the `api-gateway`
-profile in `private/ci/docs/STRUCTURE-FOR-NEW-PROJECTS.md`, rather than inherited
-from whichever commit lands first.
+The decision that followed: **`src/` in this repo, not a second repo** — the
+broker and `ww-run` are two ends of one protocol, and §9 already reframes
+`ww-run` as the broker's client library, which is hard to keep coherent across
+repos. It was made deliberately, against the `api-gateway` profile in
+`private/ci/docs/STRUCTURE-FOR-NEW-PROJECTS.md`, rather than inherited from
+whichever commit landed first.
 
 ### 6b. The concurrency cap: what the unit is, and why the mechanism is a pool
 

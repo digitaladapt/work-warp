@@ -6,6 +6,25 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`deploy/compose.yaml` now states what the host actually runs.** The stack was
+  rolled out on 2026-10-07 as a working-tree change on the host; the repo copy
+  still described the pre-rollout topology (terminal sharing the proxy's network,
+  `DOCKER_HOST` pointed at the proxy, `:latest` on the proxy image, the network
+  called `lyra-control`). The preserved host diff is now applied: `lyra-terminal`
+  is on `public` + `api` with **no `DOCKER_HOST`**, networks are `backend` and
+  `api`, and the proxy is pinned to `tecnativa/docker-socket-proxy:v0.5.0` — the
+  version every measurement in `deploy/README.md` was taken against.
+
+  `deploy/README.md` was swept to match: the rollout is recorded as executed
+  rather than proposed, the two settled decisions (image pin, network rename) are
+  marked done, the safeguards table no longer claims `cap_drop: ALL` or
+  `no-new-privileges` on the proxy — measured null, and never in the file — and
+  the open questions now say which were answered on 2026-10-07. The same sweep
+  hit `docs/design/`: §0b/§0e of `DOCKER-ACCESS.md` and §10 of `PLAN.md` now
+  record the resolutions instead of asking for them.
+
 ### Added
 
 - **The broker's request vocabulary, and the one place a container is
