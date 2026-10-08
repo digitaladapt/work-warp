@@ -1,0 +1,43 @@
+# Tests - ensure code quality, via the shared workflow.
+#
+# Checks include: PHPStan, PHPUnit, and PHP-CS-Fixer.
+
+name: Tests
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'feat*'
+      - 'fix*'
+      - 'cleanup*'
+      - 'chore*'
+  pull_request:
+    branches:
+      - 'main'
+
+jobs:
+  test:
+    uses: private/ci/.gitea/workflows/php-test.yaml@v1
+    with:
+      php-version: '8.5'
+
+      # profiles defines what to test:
+      # * web-app:      full test suite (default)
+      # * auth-gateway: skip template check
+      # * api-gateway:  skip interface checks
+      profile: api-gateway
+
+      # coverage defines how to check test-coverage:
+      # * pcov: recommended (default)
+      # * xdebug
+      coverage: 'pcov'
+      # 0-100 percentage of test-coverage required
+      coverage-min: '0'
+
+      # does failing our "conformance" check make the test suite fail
+      conformance-blocking: false
+
+    secrets:
+      # github token so composer can download dependencies
+      SYNC_GITHUB_TOKEN: ${{ secrets.SYNC_GITHUB_TOKEN }}
