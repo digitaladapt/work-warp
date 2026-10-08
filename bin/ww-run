@@ -30,7 +30,9 @@
 #   WW_IMAGE      image to run (default: ww-base:latest)
 #   WW_TTL        seconds before the janitor may stop it (default: 1800)
 #   WW_MAX_JOBS   concurrent ww- containers allowed (default: 2)
-#   DOCKER_HOST   set by compose to the proxy
+#   DOCKER_HOST   host or proxy to talk to; unset in the current stack, which
+#                 has no daemon route from the session at all (the broker will
+#                 replace this with WW_BROKER — DOCKER-ACCESS.md §9)
 
 set -euo pipefail
 

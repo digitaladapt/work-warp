@@ -429,15 +429,21 @@ Three of these cannot be done from inside the sandbox and are blockers:
 
 1. **A dockerd on the host or a dedicated VM.** None is currently reachable:
    Docker client 29.8.0 is installed, but there is no `docker.sock` and
-   `DOCKER_HOST` is unset.
-2. **A workspace volume that is not the developer's home directory.** Today
-   `/home/user` is a bind mount of `/home/andrew/apps/lyra/terminal` on
-   `/dev/nvme0n1p2`: 221G, **22G free, 90% used**. A months-long session with
-   Docker images will end that conversation abruptly. The workspace needs its own
-   volume with a quota.
-3. **A decision on the wall.** Broker-to-host daemon, or broker-to-VM? The
-   former is easier and better than today; only the latter is categorically safe
-   (§7.2).
+   `DOCKER_HOST` is unset — and since the 2026-10-07 rollout that is *by design*:
+   the session was taken off the proxy's network and its `DOCKER_HOST` removed,
+   so the broker has a real path to occupy rather than a route to share
+   (DOCKER-ACCESS.md §4, §10d).
+2. **A workspace volume that is not the developer's home directory.** Re-measured
+   2026-10-08: `/dev/nvme0n1p2` is 221G at **55% used, 95G free** (it was 22G free
+   at 90% on 2026-10-07, before the host was cleared). Better, and still not a
+   quota: a months-long session with Docker images needs its own volume with a
+   limit, because "enough free space today" is not a policy.
+3. **A decision on the wall.** Settled 2026-10-07: broker to the **host daemon**,
+   keeping the socket proxy behind it. The broker's API cannot express
+   `--privileged` and the API is unreachable from the session, so the agent-side
+   threat closes without a VM; the VM's remaining job is kernel escapes and
+   broker bugs, and is deferred until this runs somewhere other than one
+   developer's host (§7.2).
 
 ---
 
@@ -520,3 +526,4 @@ the task-loom e2e in §9 becomes a normal operation rather than a manual one.
 | 2026-10-07 | The MCP surface is built last, over a settled broker API. |
 | 2026-10-08 | Source lives in `src/` in this repo, not a second repo: the broker and `ww-run` are two ends of one protocol, and it is one application. |
 | 2026-10-08 | The exec cap is per **workspace**, not per session — the workspace is what contends. Today one session creates one workspace, so they coincide; they stop coinciding when a session may name an existing workspace. Enforced as a pool of file locks (N slots), because `FlockStore` is a mutex and a counter is a lie after a crash. |
+| 2026-10-08 | `deploy/compose.yaml` is reconciled with the running stack: the preserved host-side rollout diff is applied (terminal off the proxy network with `DOCKER_HOST` removed, networks `backend`/`api`, proxy pinned to `v0.5.0`). The host is the fact; the file now agrees with it. |
