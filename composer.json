@@ -67,7 +67,7 @@
         "post-update-cmd": [
             "@auto-scripts"
         ],
-        "lint": "php-cs-fixer fix -d",
+        "lint": "php-cs-fixer fix --dry-run --diff",
         "cs-fix": "php-cs-fixer fix",
         "stan": "phpstan analyse",
         "test": "phpunit"

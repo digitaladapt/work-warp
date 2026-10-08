@@ -31,8 +31,8 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **PHPStan level 6 with an empty baseline**, php-cs-fixer, PHPUnit and
   `composer audit` — all green, all wired to the shared CI workflow.
 
-- `.env.example`, `.env.test` and `.env.ci` with every variable documented
-  inline; `.env` is never committed.
+- `.env.example` and `.env.test` with every variable documented inline;
+  `.env` is never committed.
 
 ### Added
 
@@ -70,6 +70,23 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   newline — so `"refactor\n"` was accepted as a session name and would have
   produced a resource name with a newline in it. Now anchored with `\z`. Found
   by the test that lists the hostile names a name must not smuggle through.
+
+- The **Tests workflow could not boot at all**: `composer install`'s
+  post-install `cache:clear` died with `Environment variable not found:
+  "DEFAULT_URI"`. The shared workflow copies `.env.test` over `.env`, and
+  `.env.test` did not define the variable that `config/packages/routing.yaml`
+  reads with no fallback — only the untracked local `.env` had it, so the boot
+  passed on a developer machine and failed on every CI run. `DEFAULT_URI` now
+  lives in `.env.test`, and a new `CommittedEnvironmentTest` fails whenever a
+  `%env()` reference without a fallback is added to `config/` without a
+  definition in the committed test environment. The unused `.env.ci` is gone
+  with it: its header described a copy step the shared workflow does not have,
+  nothing read the file, and a second env file that looks load-bearing but is
+  not is worse than none.
+
+- `composer lint` ran `php-cs-fixer fix -d`, and `-d` is not an option — the
+  contributor gate documented in CONTRIBUTING.md failed before it could check
+  anything. It now matches the house script: `--dry-run --diff`.
 
 ### Notes
 
