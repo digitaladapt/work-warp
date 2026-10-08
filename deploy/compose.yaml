@@ -1,40 +1,9 @@
-# compose.yaml — the lyra host stack, revised for WorkWarp.
-#
-# A drop-in for /home/andrew/apps/lyra/compose.yaml. Note that this container's
-# /home/user IS /home/andrew/apps/lyra/terminal on the host, so this file is
-# already reachable from there as .../terminal/work-warp/deploy/compose.yaml.
-# Diff it against the live file before using it:
-#
-#   diff /home/andrew/apps/lyra/compose.yaml \
-#        /home/andrew/apps/lyra/terminal/work-warp/deploy/compose.yaml
-#
-# ---------------------------------------------------------------------------
-# ONLY TWO THINGS CHANGE
-# ---------------------------------------------------------------------------
-#   1. NEW SERVICE  lyra-dockerproxy — a filtered Docker API proxy. It is the
-#      ONLY container that touches docker.sock. It publishes nothing and joins
-#      a private control network, not `public`.
-#   2. lyra-terminal gains ONE environment line: DOCKER_HOST, pointing at the
-#      proxy. Same image, same volume, same env_file, same network, same ports.
-#      Nothing else about it changes.
-#
-# Everything else is byte-identical to your file on purpose. This file defines
-# the container I live inside and the neighbours I must not disturb, so the
-# changes are deliberately as small as they can be.
-#
-# Roll this out in two stages, not one — see deploy/README.md. Stage 1 (the
-# proxy alone) touches nothing that is running today.
-# ---------------------------------------------------------------------------
-
 networks:
   public:
     external: true
-  # The control plane. Deliberately NOT `public`: any container on `public`
-  # could otherwise reach the Docker API through the proxy, including the
-  # temporary command containers WorkWarp spins up. Only lyra-terminal and the
-  # proxy are ever on this network.
-  lyra-control:
-    name: lyra-control
+  backend:
+    driver: bridge
+  api:
     driver: bridge
 
 services:
@@ -64,63 +33,27 @@ services:
     volumes:
       - ./webui:/app/backend/data
 
-  # ---------------------------------------------------------------------------
-  # NEW: the only container with access to the Docker socket.
-  #
-  # This process holds host root if it is ever compromised — that is true of
-  # anything with docker.sock, and no amount of configuration changes it. What
-  # the configuration *can* do is make it a stock, tiny, shell-less image on no
-  # published port, and constrain what it will forward. See deploy/README.md
-  # for what this does and does not buy.
-  # ---------------------------------------------------------------------------
+  # container management (docker-socket-proxy)
   lyra-dockerproxy:
     container_name: lyra-dockerproxy
-    image: tecnativa/docker-socket-proxy:latest   # ← PIN ME (see README step 1)
+    #image: linuxserver/socket-proxy:3.4.6
+    image: tecnativa/docker-socket-proxy:v0.5.0
     restart: unless-stopped
     environment:
-      # Deny by default: tecnativa's proxy enables a section only when its
-      # variable is set, so this list *is* the policy. Sections absent from
-      # this list are unreachable — nothing under /swarm, /secrets, /configs,
-      # /plugins, /nodes, /services, /tasks or /session is forwarded at all.
-      #
       #   read
       INFO: 1                 # /info, /version, /_ping
-      CONTAINERS: 1           # list + inspect  (see GET below: inspect is the
-                              # one to reconsider if this ever matters)
+      CONTAINERS: 1           # list + inspect
       IMAGES: 1               # /images/json, needed to see what is already built
       NETWORKS: 1             # /networks, so per-session networks work
       VOLUMES: 1              # the workspace lives on one
       #   write
       POST: 1                 # the minimum that lets create/start work at all
-      # NOTE: the POST grant above is coarse and is the part I could not verify
-      # from inside the sandbox. deploy/probe-guardrails.sh measures what this
-      # configuration actually admits, and it is the first thing to run once
-      # the stack is up. Tighten after that, not before.
-    # Two things deliberately absent: no `ports:` (unreachable from outside the
-    # host) and no membership of `public` (unreachable from your other services).
     networks:
-      - lyra-control
+      - backend
     volumes:
-      # :ro matters less than it looks — a bind-mounted unix socket is usable
-      # either way — but it stops the proxy from unlinking the socket.
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    # A memory bomb or fork bomb here is a memory bomb on a host that is also
-    # running the calendar, the memory service and a dozen other things.
     mem_limit: 128m
     pids_limit: 256
-    # NOT SET, deliberately, though I first wrote both in:
-    #   cap_drop: [ALL]             — the proxy image is nginx-based, and nginx
-    #                                 needs setuid/setgid/chown to drop to its
-    #                                 own worker user. Dropping ALL stops it
-    #                                 starting. If you want it, drop everything
-    #                                 except those four and verify it boots.
-    #   read_only: true             — plausible, but unverified; it may need a
-    #                                 writable /tmp or /var/cache/nginx.
-    # Left out because a config that will not start is worse than one that is
-    # honest about being unhardened. Add them one at a time and watch it come up.
-    #cap_drop:
-    #  - ALL
-    #read_only: true
     logging:
       driver: syslog
       options:
@@ -131,21 +64,6 @@ services:
     container_name: lyra-terminal
     env_file:
       - terminal.env
-    # ---------------------------------------------------------------------
-    # THE ONLY CHANGE TO THIS SERVICE. Everything else is yours, untouched.
-    #
-    # The socket is NOT mounted here, at any path. That is the point: with no
-    # socket to talk to, this container cannot reach the Docker API except
-    # through the proxy's policy, and cannot be talked into it by a command
-    # that finds a socket lying around.
-    #
-    # It also replaces the OPEN_TERMINAL_API_KEY exposure from /proc/1/environ
-    # for the Docker path: the token, if we add one, lives in lyra-dockerproxy's
-    # environment and nowhere else. A stock proxy image has no shell to read it
-    # with, and its config is not in an env var.
-    # ---------------------------------------------------------------------
-    environment:
-      DOCKER_HOST: tcp://lyra-dockerproxy:2375
     ports:
       - 8000:8000
     expose:
@@ -158,8 +76,9 @@ services:
         tag: lyra-terminal
     networks:
       - public
-      - lyra-control
+      - api
     restart: unless-stopped
     user: ${USER_ID}:${GROUP_ID}
     volumes:
       - ./terminal:/home/user
+

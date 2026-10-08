@@ -1,10 +1,11 @@
 # Deploying WorkWarp's Docker access
 
-Two files and a script. Read this before applying any of it.
+The host stack as it now runs, and the two scripts that constrain what an agent
+does with it.
 
 | File | What it is |
 |---|---|
-| `compose.yaml` | Your host stack, revised. **Diff it against `/home/user/compose.yaml` first** — two changes, both commented. |
+| `compose.yaml` | The host stack as rolled out on 2026-10-07, reconciled with the host's working copy on 2026-10-08. It mirrors what is running; it is no longer a proposal to diff. |
 | `../bin/ww-run` | The sanctioned way to use Docker. Refuses the dangerous flags. |
 | `../bin/probe-guardrails.sh` | Measures what the proxy actually admits. Run it before trusting the prose. Needs `curl`; its exit code is the verdict (0 clean, 1 escalation reached, 2 results unknown). |
 
@@ -19,43 +20,43 @@ whole revision is reachable from the host without copying anything out:
 
 | Inside the container | On the host |
 |---|---|
-| `/home/user/compose.yaml` (the copy you gave me) | `/home/andrew/apps/lyra/terminal/compose.yaml` |
-| `/home/user/work-warp/deploy/compose.yaml` (the revision) | `/home/andrew/apps/lyra/terminal/work-warp/deploy/compose.yaml` |
+| `/home/user/work-warp/deploy/compose.yaml` (the repo copy) | `/home/andrew/apps/lyra/terminal/work-warp/deploy/compose.yaml` |
 | — | `/home/andrew/apps/lyra/compose.yaml` (the live stack) |
 
-So the diff to run, from the host, is:
-
-```bash
-diff /home/andrew/apps/lyra/terminal/compose.yaml \
-     /home/andrew/apps/lyra/terminal/work-warp/deploy/compose.yaml
-```
+The rollout started as an uncommitted working-tree diff on the host; that diff
+was preserved, and on 2026-10-08 it was applied to the repo copy — so the file
+in this repo and the file the host runs agree as of that capture. If they ever
+diverge again, the host is the fact: edit the file to agree with it, not the
+reverse.
 
 The paths in the rest of this document are host paths, because that is where you
-will be typing them.
-
-`/home/user` is a bind mount, so nothing written here can be lost by restarting
-the terminal container — which matters for step 5 below.
+will be typing them. `/home/user` is a bind mount, so nothing written here can
+be lost by restarting the terminal container.
 
 ---
 
-## What changes, and what deliberately does not
+## What the stack looks like now, and what deliberately does not change
 
-**Changes** — two, and nothing else:
+Three networks: `public` (external, shared with the neighbours), `lyra_backend`
+(the proxy alone — and the broker, when it lands), `lyra_api` (the terminal
+alone — and the broker, when it lands).
 
-1. **A new service, `lyra-dockerproxy`.** A stock `tecnativa/docker-socket-proxy`,
-   on a private `lyra-control` network, publishing no ports.
-2. **One environment line on `lyra-terminal`:** `DOCKER_HOST` → the proxy.
+- **`lyra-dockerproxy`** — pinned to `tecnativa/docker-socket-proxy:v0.5.0`, the
+  version every measurement in this document was taken against. No published
+  ports, `lyra_backend` alone.
+- **`lyra-terminal`** — on `public` + `lyra_api`. **Off the proxy's network, and
+  with `DOCKER_HOST` removed rather than re-pointed.** The removal is the
+  boundary; a variable left pointing at a name that resolves nowhere reads as
+  "broken" rather than "removed", and invites someone to fix it.
+- **`lyra-webui`** — untouched.
 
-`lyra-webui` is untouched. `lyra-terminal` keeps its image, volume, env_file,
-network, ports and user. **The Docker socket is not mounted into it**, at any
-path — that is the whole point, and it is also why this path is *better* than
-mounting the socket directly: a command that goes looking for a socket will not
-find one.
+**The Docker socket is not mounted into `lyra-terminal`**, at any path — that is
+the whole point, and it is also why this path is *better* than mounting the
+socket directly: a command that goes looking for a socket will not find one.
 
-Measured, with comments and blank lines stripped: the diff is **27 added lines
-and 1 removed** — a trailing blank line, and nothing of substance. It is
-otherwise purely additive, so nothing that is running today is altered, only
-added to.
+The rollout happened in two stages, smallest first. The sequence is kept below
+because a second host is a real scenario, and because re-running the checks
+after any stack change is how the boundary gets re-established.
 
 ---
 
@@ -73,23 +74,28 @@ plainly than let a tidy diagram imply otherwise.
   the matching variable is set, and my list omits the dangerous families
   entirely: no `/swarm`, `/secrets`, `/configs`, `/plugins`, `/nodes`,
   `/services`, `/tasks`, `/session`. Those are unreachable, not merely unused.
-- **The credential moves out of reach.** The token, if we add one, sits in the
-  proxy container — a stock image with no shell to read it with, and whose
-  config lives in its own environment rather than in a file. That is the
-  `OPEN_TERMINAL_API_KEY` exposure from `/proc/1/environ`, fixed for this path.
+- **The credential moves out of reach.** Corrected 2026-10-07, and the
+  correction is the whole point: the proxy holds **no** credential at all
+  (measured — `AUTH=0`, anonymous callers accepted). The credential belongs to
+  the **broker**, which does not exist yet; when it does, the session
+  authenticates to the broker and only the broker holds a token — so the
+  `OPEN_TERMINAL_API_KEY` exposure from `/proc/1/environ` is fixed for this path
+  by moving the secret to a process the agent cannot read, not by hiding it in
+  the proxy.
 - **Blast radius is partly capped.** Corrected 2026-10-07 against the running
   container, because this bullet used to claim more than the compose file does.
   Measured: `mem_limit` 128m and `pids_limit` 256 are **in force**. But
   `CapDrop`, `CapAdd` and `SecurityOpt` are all **null**, and the proxy runs as
   **root** — so there is no `cap_drop: ALL` and no `no-new-privileges`, and this
-  bullet previously said there were. The compose file is honest about this in its
-  own comments (both are deliberately commented out, because nginx needs
-  setuid/setgid/chown and because `read_only` was unverified); the README was
-  not. Command containers still get `--memory`, `--cpus` and `--pids-limit`.
-  Worth fixing, but not the same priority as the network change: `/var/run/docker.sock`
-  already means host root if this process is ever compromised, and dropped
-  capabilities do not change that. It is defence against a *different*, narrower
-  bug — a proxy CVE — which is real but second-order.
+  bullet previously said there were. The compose file's first draft carried both
+  as commented-out options (nginx needs setuid/setgid/chown to drop to its worker
+  user, and `read_only` was unverified); the rolled-out file carries neither, and
+  the README used to claim more than either did. Command containers still get
+  `--memory`, `--cpus` and `--pids-limit`. Worth fixing, but not the same
+  priority as the network change: `/var/run/docker.sock` already means host root
+  if this process is ever compromised, and dropped capabilities do not change
+  that. It is defence against a *different*, narrower bug — a proxy CVE — which
+  is real but second-order.
 - **The default is the safe one.** `ww-run` runs with `--network none` unless a
   human asked otherwise, and refuses `--privileged`, `--pid=host`, `--device`,
   host bind mounts and `--network public` outright. There is no override flag:
@@ -109,8 +115,8 @@ from **creating** a privileged container. I expect `probe-guardrails.sh
 --with-create` to demonstrate precisely this, and I have written the script to
 call it a failure rather than paper over it.
 
-This is why I asked about the daemon in §7.2 of the plan, and the answer changes
-what this deployment is:
+The daemon question — host or VM — is answered: **host daemon, with the proxy
+kept behind the broker** (2026-10-07). Under that answer the table reads:
 
 | Daemon location | What `lyra-dockerproxy` is |
 |---|---|
@@ -118,9 +124,10 @@ what this deployment is:
 | A VM you provision | **Still guardsrails — and now there is a real wall behind them.** Escalation lands in a VM, not on your host. |
 
 If the goal is "even a misbehaving agent cannot reach host root", the VM is the
-part that delivers it, and the proxy does not substitute for it. Today's offer
-gets a functional, well-behaved WorkWarp with strong accident-prevention; it does
-not get a hostile-agent-proof one. I want you to be choosing that knowingly.
+part that delivers it, and the proxy does not substitute for it. The chosen
+answer gets a functional, well-behaved WorkWarp with strong accident-prevention;
+it does not get a hostile-agent-proof one. The VM remains the upgrade for that,
+and it is deferred rather than dismissed.
 
 ### Measured, 2026-10-07 — the expectations above, replaced with results
 
@@ -172,9 +179,11 @@ deliberate exposure rather than an oversight.
 `Server: Docker/29.7.2` — the *engine's* banner, passed through. So hitting the
 proxy does **not** tell you which proxy you are behind, and the two behave
 differently: v0.5.0 (running here) does not gate on method; a later release is
-reported to add that. This is the concrete reason to pin by digest: the file
-currently runs `:latest`, and `:latest` may be a different policy than the one
-measured here.
+reported to add that. This is why the pin matters: the file ran `:latest` while
+these measurements were taken, and the pin landed as `v0.5.0` — the version
+measured. A stale-`:latest` re-pull could have swapped the policy out from under
+the measurements. Resolving the tag to a digest is the stricter form of the same
+pin, left as a one-off for whoever is next at the host.
 
 **One confluence worth naming, because it is luck not design.** The version of
 `probe-guardrails.sh` on `main` could not fail. Its method-filtering check used
@@ -185,39 +194,50 @@ finding, the `DELETE` hole. The two fixes that made it honest and the deployment
 being measured landed within the same hour, which is the only reason this
 matters as a footnote rather than as a false clean bill of health.
 
-### The three decisions this leaves
+### The decisions this leaves
 
-1. **`CONTAINERS: 1` — accept for milestone 1, or split now.** Accepting means
-   134 sensitive-looking values are readable through the proxy by anything
-   holding the token. Splitting means not using this proxy for that endpoint.
-2. **`DELETE` — widen the policy or narrow the token.** Nothing can clean up
-   today (no `DELETE` in the proxy's variable list, and the flag is the only
-   thing that gates method). The janitor is the feature that needs it.
-3. **Pin the image.** `:latest` may not be the v0.5.0 measured above.
+1. **`CONTAINERS: 1` — accept for milestone 1, or split now** *(still open)*.
+   Accepting means 134 sensitive-looking values are readable through the proxy by
+   anything holding the token. Splitting means not using this proxy for that
+   endpoint.
+2. **`DELETE` — widen the policy or narrow the token** *(still open)*. Nothing
+   can clean up today (no `DELETE` in the proxy's variable list, and the flag is
+   the only thing that gates method). The janitor is the feature that needs it.
+3. **Pin the image** — **done**, landed as `v0.5.0` (tag) rather than `:latest`:
+   the tag is the version every measurement here was taken against, and a stale
+   `:latest` re-pull could have swapped the policy out from under them.
+   Resolving `v0.5.0` to a digest is the stricter form of the same pin, left as a
+   one-off for whoever is next at the host.
+
+The network rename is likewise done — in the file (`backend`/`api`), because
+editing the file to match reality is cheaper than renaming a live network.
 
 ---
 
-## Rollout: two stages, smallest first
+## Rollout: two stages, smallest first — **executed 2026-10-07**
 
-### Stage 1 — proxy only. Touches nothing that is running.
+This section is the record of how the stack moved to its current shape, kept
+because a second host is a real scenario. It is written in the order the work
+*was* done, not as advice to redo it: steps 1–4 describe what went up first,
+steps 5–7 the terminal flip, and the verification that followed is in §10d of
+`docs/design/DOCKER-ACCESS.md`.
 
-1. **Pin the proxy image.** `tecnativa/docker-socket-proxy:latest` is a moving
-   tag, and pinning matters more here than anywhere else in the stack: this
-   container has the socket. Resolve the current digest and put it in:
+### Stage 1 — proxy only. Touched nothing that was running.
+
+1. **Pin the proxy image.** Done as `tecnativa/docker-socket-proxy:v0.5.0` — the
+   version every measurement below was taken against. For a strictly stricter
+   pin, resolve it to a digest:
 
    ```bash
-   docker pull tecnativa/docker-socket-proxy:latest
+   docker pull tecnativa/docker-socket-proxy:v0.5.0
    docker inspect --format='{{index .RepoDigests 0}}' \
-     tecnativa/docker-socket-proxy:latest
+     tecnativa/docker-socket-proxy:v0.5.0
    # then set:  image: tecnativa/docker-socket-proxy@sha256:...
    ```
 
-   I deliberately left `latest` in the file rather than inventing a version
-   number, because a wrong pin is worse than an obvious one.
-
-2. **Add the `lyra-dockerproxy` service and the `lyra-control` network** to your
-   copy, and **do not touch `lyra-terminal` yet**. `docker network create
-   lyra-control` if compose is unwilling to adopt an existing name.
+2. **Add the `lyra-dockerproxy` service** and its network (`lyra_backend` in the
+   current file; the first draft of this document called it `lyra-control`, which
+   was never what the host ran) — **without touching `lyra-terminal`**.
 
 3. **Bring up only the new service** — the terminal keeps running undisturbed:
 
@@ -226,52 +246,60 @@ matters as a footnote rather than as a false clean bill of health.
    docker compose up -d lyra-dockerproxy
    ```
 
-4. **Probe it from a throwaway container** on the control network, not from the
-   terminal yet, so a broken proxy cannot affect anything. Run this from the host
-   shell — the bind mount has to be a host path, and the scripts are in `bin/`,
-   not `deploy/bin/` (the path this step used to give):
+4. **Probe it from a throwaway container** on the backend network, not from the
+   terminal — so a broken proxy cannot affect anything. Run this from the host
+   shell; the scripts are in `bin/`, not `deploy/bin/`:
 
    ```bash
-   docker run --rm --network lyra-control -e DOCKER_HOST=tcp://lyra-dockerproxy:2375 \
+   docker run --rm --network lyra_backend -e DOCKER_HOST=tcp://lyra-dockerproxy:2375 \
      -v /home/andrew/apps/lyra/terminal/work-warp/bin:/bin-w:ro \
      alpine sh -c 'apk add -q curl >/dev/null 2>&1; /bin-w/probe-guardrails.sh'
    ```
 
-   Read the output before going further. `POST /build` and `POST /exec` blocked
-   is the result you want; anything under "READ paths that must be BLOCKED"
-   showing `REACHED` means the variable list needs correcting. The exit code is
-   the verdict: **0** nothing found, **1** at least one escalation reached,
-   **2** no read path answered at all, so the results are unknown rather than
-   clean — check `DOCKER_HOST` and that curl works before reading anything into
-   a 2.
+   The exit code is the verdict: **0** nothing found, **1** at least one
+   escalation reached, **2** no read path answered at all, so the results are
+   unknown rather than clean — check `DOCKER_HOST` and that curl works before
+   reading anything into a 2.
 
-### Stage 2 — let the terminal use it. This restarts the container I live in.
+   Result when run: 1 finding — `DELETE` is forwarded on
+   `/volumes`, `/containers` and `/networks`, because this proxy version does not
+   gate on method. That finding stands, and the janitor is the feature that will
+   need it.
 
-5. **Add the single `DOCKER_HOST` line** to `lyra-terminal` and the
-   `lyra-control` network entry.
+### Stage 2 — the terminal flip. This restarted the container I live in.
+
+5. **Remove `lyra-terminal` from the proxy's network and delete its
+   `DOCKER_HOST` line** — *removal*, not re-pointing. Leaving the variable set to
+   a hostname that now resolves nowhere reads as "broken" rather than "removed",
+   and invites someone to fix it by restoring the route.
 
    ```bash
    docker compose up -d lyra-terminal
    ```
 
-   **This kills my current shell session.** The new container gets a new
-   hostname, a new `/proc`, and the old shell with it. Nothing on the workspace
-   volume is lost — `/home/user` is a bind mount, so every file survives — but
-   any process I had running dies, and I will come back unaware that a restart
-   happened. Worth doing when you are at the keyboard rather than mid-task.
+   This killed my then-current shell session. Nothing on the workspace volume
+   was lost — `/home/user` is a bind mount — but any process I had running died
+   without my knowing about it.
 
 6. **From inside the new terminal**, confirm the socket really is absent and the
-   proxy really is the only path:
+   proxy really is unreachable:
 
    ```bash
    ls /var/run/docker.sock            # must not exist
-   echo $DOCKER_HOST                  # must be tcp://lyra-dockerproxy:2375
-   docker info | head -5              # must work
-   ww-run guard-test                  # must pass
+   echo $DOCKER_HOST                  # must be empty
+   ww-run guard-test                  # must pass (and does, with no daemon)
    ```
 
-7. **Re-run the create probe**, now from the terminal, with `--with-create`.
-   This is the measurement that decides the table above.
+   Measured after the flip, with controls (DOCKER-ACCESS.md §10d): five
+   neighbours resolve on `public` (positive control), an invented name does not
+   (negative control), `lyra-dockerproxy` does **not** resolve, and neither
+   bridge the session sits on serves the API on `:2375`. That is the check that
+   decides the removal is a boundary rather than a speed bump.
+
+7. **The one check still open** is §10c check 3: re-run 6 *while holding the
+   broker's token*, so a network mistake cannot be hidden behind an absent
+   credential. It needs the broker to exist; it is the first check that can fail
+   once it does.
 
 ---
 
@@ -282,7 +310,7 @@ matters as a footnote rather than as a false clean bill of health.
 | One container with the socket | `compose.yaml` | Goal an attacker must reach to get the socket at all |
 | Deny-by-default API sections | proxy env | `/secrets`, `/swarm`, `/plugins`, `/nodes` … |
 | No published port, private network | `compose.yaml` | Anything on `public` reaching the API — including my own command containers |
-| `cap_drop: ALL`, `no-new-privileges` | proxy | Capability escalation inside the proxy |
+| Pinned proxy version | `compose.yaml` | A policy swap under the measurements, via a moving `:latest` |
 | `mem_limit: 128m`, `pids_limit: 256` | proxy | A fork or memory bomb taking the host down |
 | `ww-` prefix + `ww.created-by` label | `ww-run` | Ownership inferred from a name anyone could type |
 | Acts only on those labels | `ww-run reap` | Aiming cleanup at your neighbours |
@@ -294,12 +322,13 @@ matters as a footnote rather than as a false clean bill of health.
 | No PTY, `PAGER=cat` | `ww-run` | The stuck-pager bug, by construction |
 | One workspace volume, no other mounts | `ww-run` | A command container reaching a sibling's data |
 
-Two hardening options I wrote and then removed, because neither could be tested
-from inside this sandbox and a stack that will not start is worse than one that
-admits what it has not hardened: `cap_drop: [ALL]` on the proxy (it is
-nginx-based and needs setuid/setgid/chown to drop to its worker user) and
-`read_only: true` (may need a writable `/tmp`). Both are left in the file as
-comments. Add them one at a time and watch the container come up.
+Two hardening options that were written, tried and left out, because neither
+could be tested from inside the sandbox and a stack that will not start is worse
+than one that admits what it has not hardened: `cap_drop: [ALL]` on the proxy (it
+is nginx-based and needs setuid/setgid/chown to drop to its worker user) and
+`read_only: true` (may need a writable `/tmp`). There is no row for either above,
+because neither is in force — add them one at a time and watch the container
+come up. The proxy runs as **root** today.
 
 **Every one of these is convention, not a wall, and they all share a single
 failure mode: anything with socket access can bypass `ww-run` by calling the API
@@ -320,8 +349,8 @@ have caught anyway.
 - **`--privileged` on anything, ever.**
 - **Naming `public` as the proxy's network**, or its per-command equivalent.
 - **`docker system prune`** in any form. It does not distinguish your images
-  from mine, and on a 90%-full disk it is the fastest way to lose something you
-  wanted.
+  from mine, and on a shared, unquoted disk it is the fastest way to lose
+  something you wanted.
 - **Building on `lyra-terminal`'s own image tag.** A build that clobbers the
   running container's image is a self-inflicted outage.
 
@@ -329,15 +358,21 @@ have caught anyway.
 
 ## Open questions this raises
 
-1. **Host daemon or VM?** Decides the table above. Everything else can proceed
-   either way.
+1. **Host daemon or VM?** — **answered 2026-10-07: host daemon, keeping the
+   proxy.** The broker's API cannot express `--privileged`, and the network
+   removal makes the API unreachable from the session, so the agent-side threat
+   closes without a VM. The VM defends a *different* threat class — kernel
+   escapes and broker bugs — and remains worth revisiting when this leaves one
+   developer's host.
 2. **Rootless `dockerd` worth another look?** If the host's daemon were rootless,
    a container escape lands as a host *user*, not host root — a large
    improvement for one line, if your host daemon can be changed. Not something I
    can decide from in here.
 3. **A proxy token?** `docker-socket-proxy` does not do auth itself; a token
-   needs a shim in front. Worth it only once the daemon question is settled.
+   needs a shim in front. The daemon question is settled; this one is still open,
+   and the broker now answers it for real callers — a proxy token would only
+   matter for anything that reached the proxy directly, which nothing should.
 4. **Where auth lives, still.** The proxy has the credential exposure advantage,
-   not a safety one. If you use the anonymous socket you have today, the socket
-   peer-credential is the whole of the auth, and that is a fail-closed default
-   for a real deployment rather than a foundation.
+   not a safety one. The broker replaces the anonymous-socket question with a
+   real one: it holds the only credential, and every caller authenticates to it
+   rather than to the daemon.
