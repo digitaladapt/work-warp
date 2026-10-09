@@ -69,6 +69,46 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   `docs/design/DOCKER-ACCESS.md` §6b for the two cases and why the distinction
   is cheap to honour now and expensive to retrofit.
 
+- **The Docker client, as a seam.** `App\Docker\DockerApi` is the whole of what
+  the broker can ask the daemon to do — create from a name and a payload
+  somebody else assembled, start, inspect, kill, remove, logs, and the
+  workspace volume — with no raw-endpoint escape hatch, so the shape of the
+  door is part of the vocabulary. `HttpDockerApi` is the real one, and
+  `config/services_test.yaml` swaps in a scripted double: CI has no daemon, and
+  the integration tests assert what the broker *asked Docker to do* rather than
+  what it reached.
+
+  Failures leave as two typed shapes, deliberately: `DockerUnavailable`
+  (nothing was asked; `503`) and `DockerRefused` (asked and told no, in the
+  daemon's own words; `502`). A `unix://` `WW_DOCKER_HOST` is refused by name
+  before any request leaves — reaching the daemon socket directly is the exact
+  thing the proxy exists to prevent.
+
+- **The log reader, for output that must not be trusted to fit.**
+  `GET /containers/{id}/logs` on a non-TTY container answers in Docker's
+  multiplexed format — `[stream(1), pad(3), size(4 big-endian)]` frames — and
+  the reader parses them from a buffer (they split across chunks at any byte),
+  splits stdout from stderr, caps each stream, and **stops reading the moment
+  a cap is hit**, cancelling the transfer rather than draining output it has
+  already decided to discard. A lost connection keeps what arrived and says
+  `truncated`; a frame header claiming megabytes is refused rather than
+  buffered towards.
+
+- **`POST /v1/sessions`, and the gate in front of it.** Creating a session
+  that exists adopts it (`200`) rather than failing — a client retrying after
+  a timeout should not have to guess whether the first attempt landed — and a
+  fresh one answers `201`. The workspace volume is created here and carries
+  the `ww.` labels; `App\Docker\Labels` now owns that vocabulary (the volume
+  is its second user; the constants used to live inside `ContainerSpec`).
+
+  Everything under `/v1` requires `Authorization: Bearer $WW_TOKEN`, checked
+  **before routing** so an unauthenticated caller gets one answer for every
+  path and cannot probe which routes exist. An unset token answers `503`
+  rather than allowing through: that is the one condition under which the
+  broker would accept anonymous callers while claiming to be the only thing
+  holding the Docker credential. `/health` and `/ready` stay open — they touch
+  nothing.
+
 ### Fixed
 
 - `Slots` exceeded its own capacity on the first run. A `Lock` is re-entrant

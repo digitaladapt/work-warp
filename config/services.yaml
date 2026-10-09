@@ -58,6 +58,12 @@ services:
         arguments:
             $dockerHost: '%docker_host%'
 
+    # The session API. Registered like every controller — explicitly, with the
+    # tag — because src/Session/ is excluded from auto-registration below as a
+    # value-object namespace.
+    App\Session\SessionController:
+        tags: ['controller.service_arguments']
+
     # The exec budget. Built by its static factory because a pool must be shared
     # process-wide: slot locks are held for the whole lifetime of a command, and
     # a pool constructed per request would give every slot back the moment the
@@ -75,3 +81,24 @@ services:
         factory: ['App\Exec\Slots', 'of']
         arguments:
             - '%max_concurrency%'
+
+    # The Docker client. One definition and one alias, so everything that
+    # needs Docker asks for the interface and the test environment can swap
+    # the implementation (services_test.yaml) without touching broker code.
+    # Registered explicitly because src/Docker/ is excluded below, for the
+    # value objects that share the namespace.
+    App\Docker\HttpDockerApi:
+        arguments:
+            $dockerHost: '%docker_host%'
+
+    App\Docker\DockerApi:
+        alias: App\Docker\HttpDockerApi
+
+    # The bearer gate for /v1. It runs before routing, so an unauthenticated
+    # caller gets the same answer for every /v1 path and cannot use the status
+    # codes to enumerate routes. An unset token refuses with 503 rather than
+    # allowing: "only the broker holds the Docker credential" is false the
+    # moment anonymous callers are accepted because a variable was left blank.
+    App\Security\BrokerTokenListener:
+        arguments:
+            $configuredToken: '%env(WW_TOKEN)%'

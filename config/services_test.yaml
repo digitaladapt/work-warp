@@ -1,0 +1,21 @@
+# The test environment's service overrides. Loaded only when APP_ENV=test
+# (MicroKernelTrait imports `services_{env}.yaml` after `services.yaml`).
+#
+# One override, and it is the point of the Docker seam: CI has no daemon, and
+# CONTRIBUTING.md is explicit that tests assert what the broker *builds*,
+# never what it *reaches*. So the DockerApi alias is repointed at a scripted
+# double that records every call, and the integration tests read those records
+# the way the unit tests read a MockHttpClient's captured requests.
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\Tests\Support\ScriptedDockerApi:
+        # Public so a test can fetch it, script it, and read back what the
+        # broker asked Docker to do.
+        public: true
+
+    App\Docker\DockerApi:
+        alias: App\Tests\Support\ScriptedDockerApi
