@@ -1,17 +1,19 @@
 # The test environment's service overrides. Loaded only when APP_ENV=test
 # (MicroKernelTrait imports `services_{env}.yaml` after `services.yaml`).
 #
-# One override, and it is the point of the Docker seam: CI has no daemon, and
-# CONTRIBUTING.md is explicit that tests assert what the broker *builds*,
-# never what it *reaches*. So the DockerApi alias is repointed at a scripted
-# double that records every call, and the integration tests read those records
-# the way the unit tests read a MockHttpClient's captured requests.
+# Two overrides, and both exist so the quality gates can run with no daemon
+# and no real seconds:
 
 services:
     _defaults:
         autowire: true
         autoconfigure: true
 
+    # 1. The Docker seam. CI has no daemon, and CONTRIBUTING.md is explicit
+    # that tests assert what the broker *builds*, never what it *reaches*.
+    # So the DockerApi alias is repointed at a scripted double that records
+    # every call, and the integration tests read those records the way the
+    # unit tests read a MockHttpClient's captured requests.
     App\Tests\Support\ScriptedDockerApi:
         # Public so a test can fetch it, script it, and read back what the
         # broker asked Docker to do.
@@ -19,3 +21,17 @@ services:
 
     App\Docker\DockerApi:
         alias: App\Tests\Support\ScriptedDockerApi
+
+    # 2. The clock. The exec runner waits for a command by polling against a
+    # deadline, and a real clock would make every timeout test either slow
+    # (sleep for real seconds) or flaky (assert on wall time). The fake moves
+    # only when something asks it to sleep, so the same loop runs in
+    # microseconds and the deadline arithmetic stays the production one.
+    App\Tests\Support\FakeClock:
+        public: true
+
+    Psr\Clock\ClockInterface:
+        alias: App\Tests\Support\FakeClock
+
+    Symfony\Component\Clock\ClockInterface:
+        alias: App\Tests\Support\FakeClock

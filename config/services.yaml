@@ -69,18 +69,29 @@ services:
     # a pool constructed per request would give every slot back the moment the
     # request ended. See DOCKER-ACCESS.md §6b.
     #
-    # `public: true` on purpose, and not a mistake to tidy away. Symfony removes
-    # or inlines a private service that nothing references — and until `exec`
-    # lands, nothing does — so a private definition would not exist to be
-    # instantiated, and the wiring test could not assert that the capacity came
-    # from configuration. This is the PHP service container, not an HTTP surface:
-    # the only thing `public` costs is a `get()` someone could call from inside
-    # the process, which is where the broker's own code already runs.
+    # `public: true` on purpose, and not a mistake to tidy away. It is
+    # referenced by ExecRunner now, but the wiring test also fetches it by id
+    # to assert the capacity came from configuration; `public` costs nothing
+    # here — this is the PHP service container, not an HTTP surface.
     App\Exec\Slots:
         public: true
         factory: ['App\Exec\Slots', 'of']
         arguments:
             - '%max_concurrency%'
+
+    # The command runner: the lifecycle from slot to result. Registered
+    # explicitly because src/Exec/ is excluded from auto-registration above;
+    # its DockerApi, Slots, logger and clock are autowired, and the two
+    # configuration values are named because they are scalars.
+    App\Exec\ExecRunner:
+        arguments:
+            $image: '%command_image%'
+            $ttlGrace: '%ttl_grace%'
+
+    # The exec endpoint. A controller like any other: tagged so its action
+    # arguments resolve from the request.
+    App\Exec\ExecController:
+        tags: ['controller.service_arguments']
 
     # The Docker client. One definition and one alias, so everything that
     # needs Docker asks for the interface and the test environment can swap

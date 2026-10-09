@@ -238,6 +238,52 @@ final class ExecRequestTest extends TestCase
         }
     }
 
+    #[DataProvider('brokerOwnedNamesProvider')]
+    public function test_the_pager_guard_variables_are_refused_because_the_broker_owns_them(string $name): void
+    {
+        // PLAN.md §5.1 makes these five the fix for the three-day-old pagers:
+        // a captured output channel must never look like a terminal. The guard
+        // is load-bearing, so it cannot be optional — and "who wins when two
+        // copies of a variable exist" is decided by each libc differently
+        // (glibc's getenv returns the first match), so the way to make the
+        // broker's copy authoritative is to refuse the caller's outright.
+        try {
+            ExecRequest::fromArray(['cmd' => ['true'], 'env' => [$name => 'something']]);
+            self::fail('the broker-owned pager guard variables must be refused');
+        } catch (InvalidExecRequest $e) {
+            self::assertStringContainsString('owned by the broker', $e->getMessage());
+            self::assertStringContainsString('§5.1', $e->getMessage());
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function brokerOwnedNamesProvider(): iterable
+    {
+        yield 'PAGER' => ['PAGER'];
+        yield 'GIT_PAGER' => ['GIT_PAGER'];
+        yield 'TERM' => ['TERM'];
+        yield 'NO_COLOR' => ['NO_COLOR'];
+        yield 'CI' => ['CI'];
+    }
+
+    public function test_the_broker_owned_list_is_exactly_the_pager_guard_from_the_plan(): void
+    {
+        // A closed list, asserted rather than described: widening it is a
+        // vocabulary change, and should be a deliberate one.
+        self::assertSame(
+            [
+                'PAGER' => 'cat',
+                'GIT_PAGER' => 'cat',
+                'TERM' => 'dumb',
+                'NO_COLOR' => '1',
+                'CI' => '1',
+            ],
+            ExecRequest::BROKER_OWNED_ENV,
+        );
+    }
+
     public function test_a_non_string_environment_value_is_refused(): void
     {
         $this->expectException(InvalidExecRequest::class);

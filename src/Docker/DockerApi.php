@@ -10,10 +10,11 @@ namespace App\Docker;
  *
  * Every method is a deliberate subset of the Docker API: create a container
  * from a name and a payload somebody else assembled, start it, inspect it, kill
- * it, remove it, read its logs, and manage the workspace volume. There is no
- * method that takes a raw endpoint, a caller-chosen path, or a request body
- * from a caller — the shape of the door is part of the vocabulary, in the same
- * way the request objects are (DOCKER-ACCESS.md §2, §7).
+ * it, remove it, read its logs, and manage the workspace volume and the
+ * session's network. There is no method that takes a raw endpoint, a
+ * caller-chosen path, or a request body from a caller — the shape of the door
+ * is part of the vocabulary, in the same way the request objects are
+ * (DOCKER-ACCESS.md §2, §7).
  *
  * The interface exists for one practical reason on top of the principled ones:
  * the quality gates must run without a daemon. CONTRIBUTING.md is explicit that
@@ -69,6 +70,22 @@ interface DockerApi
      * memory leak with extra steps.
      */
     public function containerLogs(string $id, int $maxBytes): LogOutput;
+
+    /**
+     * `GET /networks/{id}` as a question, like `volumeExists`: asked before
+     * anything is created, so a session's network is made lazily and exactly
+     * once.
+     */
+    public function networkExists(string $name): bool;
+
+    /**
+     * `POST /networks/create`. The name is checked by the daemon as the
+     * network's own name; creating one that already exists is a conflict the
+     * caller resolves by asking first.
+     *
+     * @param array<string, string> $labels
+     */
+    public function createNetwork(string $name, array $labels): void;
 
     /**
      * `POST /volumes/create`. Creating a volume that already exists is a no-op

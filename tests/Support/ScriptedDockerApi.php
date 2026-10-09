@@ -26,16 +26,59 @@ final class ScriptedDockerApi implements DockerApi
     /** @var array<string, array<string, string>> volume name → labels */
     private array $volumes = [];
 
+    /** @var array<string, array<string, string>> network name → labels */
+    private array $networks = [];
+
     /** @var array<string, DockerException> method name → the failure it throws next */
     private array $failures = [];
 
     /** @var list<array{method: string, args: array<string, mixed>}> */
     private array $calls = [];
 
-    /** @var array<string, array{name: string, payload: array<string, mixed>, started: bool, finished: bool, exitCode: ?int}> */
+    /** @var array<string, array{name: string, payload: array<string, mixed>, started: bool, finished: bool, exitCode: ?int, logs: ?LogOutput}> */
     private array $containers = [];
 
     private int $containersCreated = 0;
+
+    /**
+     * How the next started container behaves: `finish` ends by itself on the
+     * first inspection with the given exit code; `linger` runs until killed.
+     *
+     * This is the script's answer to "what does the command do" — the one
+     * thing about a real container a test cannot otherwise decide, because
+     * the whole point of the suite is that no container runs.
+     *
+     * @var array{behaviour: string, exitCode: int}
+     */
+    private array $runScript = ['behaviour' => 'finish', 'exitCode' => 0];
+
+    /**
+     * The next created container finishes by itself with this exit code, on
+     * its first inspection.
+     */
+    public function runToCompletion(int $exitCode = 0): void
+    {
+        $this->runScript = ['behaviour' => 'finish', 'exitCode' => $exitCode];
+    }
+
+    /**
+     * The next created container runs until it is killed — the shape of a
+     * command that ignores its deadline.
+     */
+    public function linger(): void
+    {
+        $this->runScript = ['behaviour' => 'linger', 'exitCode' => 0];
+    }
+
+    /**
+     * The output the next started container's logs read back as.
+     */
+    public function scriptNextLogs(LogOutput $logs): void
+    {
+        $this->nextLogs = $logs;
+    }
+
+    private ?LogOutput $nextLogs = null;
 
     /**
      * The next call to `$method` throws this instead of doing its job. One
@@ -110,7 +153,19 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('startContainer');
         $this->mustHave($id);
 
+        // The run script applies at *start*, not at create: a container that
+        // never started is not a container that finished.
         $this->containers[$id]['started'] = true;
+
+        if ('finish' === $this->runScript['behaviour']) {
+            $this->containers[$id]['finished'] = true;
+            $this->containers[$id]['exitCode'] = $this->runScript['exitCode'];
+        }
+
+        if (null !== $this->nextLogs) {
+            $this->containers[$id]['logs'] = $this->nextLogs;
+            $this->nextLogs = null;
+        }
     }
 
     #[Override]
@@ -161,10 +216,7 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('containerLogs');
         $this->mustHave($id);
 
-        // No logs are scripted yet: nothing in the broker reads them until the
-        // exec endpoint lands, and inventing a scripting surface now would be
-        // guessing at what it needs.
-        return new LogOutput();
+        return $this->containers[$id]['logs'] ?? new LogOutput();
     }
 
     #[Override]
@@ -174,6 +226,37 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('createVolume');
 
         $this->volumes[$name] = $labels;
+    }
+
+    #[Override]
+    public function networkExists(string $name): bool
+    {
+        $this->record('networkExists', ['name' => $name]);
+        $this->maybeFail('networkExists');
+
+        return isset($this->networks[$name]);
+    }
+
+    #[Override]
+    public function createNetwork(string $name, array $labels): void
+    {
+        $this->record('createNetwork', ['name' => $name, 'labels' => $labels]);
+        $this->maybeFail('createNetwork');
+
+        $this->networks[$name] = $labels;
+    }
+
+    public function hasNetwork(string $name): bool
+    {
+        return isset($this->networks[$name]);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function labelsOfNetwork(string $name): array
+    {
+        return $this->networks[$name] ?? [];
     }
 
     #[Override]

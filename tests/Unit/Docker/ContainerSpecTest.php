@@ -133,17 +133,44 @@ final class ContainerSpecTest extends TestCase
         );
     }
 
-    public function test_the_container_environment_is_exactly_what_was_declared_plus_one_variable(): void
+    public function test_the_container_environment_is_exactly_what_was_declared_plus_the_brokers_own(): void
     {
         // Exact equality on purpose. The failure this guards against is
-        // inheritance: any variable from the broker's own environment appearing
-        // here would be a leak of the same class as /proc/1/environ.
+        // inheritance: any variable from the broker's own environment
+        // appearing here would be a leak of the same class as
+        // /proc/1/environ. The broker's own five — PAGER, GIT_PAGER, TERM,
+        // NO_COLOR, CI — are the pager guard (PLAN.md §5.1) and are stamped
+        // on every command; the caller cannot collide with them, because
+        // their names are refused at request construction.
         $payload = $this->payload(ExecRequest::fromArray([
             'cmd' => ['true'],
             'env' => ['NODE_ENV' => 'test'],
         ]));
 
-        self::assertSame(['NODE_ENV=test', 'WW_SESSION=demo'], $payload['Env']);
+        self::assertSame([
+            'NODE_ENV=test',
+            'WW_SESSION=demo',
+            'PAGER=cat',
+            'GIT_PAGER=cat',
+            'TERM=dumb',
+            'NO_COLOR=1',
+            'CI=1',
+        ], $payload['Env']);
+    }
+
+    public function test_a_captured_channel_never_advertises_a_human_terminal(): void
+    {
+        // The bug from PLAN.md §2.3, refused in two independent layers: no TTY
+        // is allocated, and TERM=dumb is set so a command that inspects the
+        // environment cannot conclude it is talking to a person. The five
+        // variables come from the broker and are asserted as an exact list in
+        // the test above; this one asserts the intent.
+        $payload = $this->payload(ExecRequest::fromArray(['cmd' => ['git', 'log']]));
+
+        self::assertFalse($payload['Tty']);
+        self::assertContains('TERM=dumb', $payload['Env']);
+        self::assertContains('PAGER=cat', $payload['Env']);
+        self::assertContains('GIT_PAGER=cat', $payload['Env']);
     }
 
     public function test_the_broker_stamps_its_own_labels_and_owns_the_ttl(): void

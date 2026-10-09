@@ -35,6 +35,9 @@ final class Labels
     /** A workspace volume: the persistent half of a session. */
     public const string KIND_WORKSPACE = 'workspace';
 
+    /** A session network: created lazily, the first time a command asks to reach one. */
+    public const string KIND_NETWORK = 'network';
+
     /**
      * The labels every workspace volume carries.
      *
@@ -50,6 +53,22 @@ final class Labels
             self::LABEL_CREATED_BY => self::CREATED_BY,
             self::LABEL_SESSION => $session->value,
             self::LABEL_KIND => self::KIND_WORKSPACE,
+        ];
+    }
+
+    /**
+     * The labels a session's network carries, when a command first asks to
+     * reach it. Same reasoning as the volume: ownership by label, never by the
+     * name someone could have typed.
+     *
+     * @return array<string, string>
+     */
+    public static function network(SessionName $session): array
+    {
+        return [
+            self::LABEL_CREATED_BY => self::CREATED_BY,
+            self::LABEL_SESSION => $session->value,
+            self::LABEL_KIND => self::KIND_NETWORK,
         ];
     }
 }
