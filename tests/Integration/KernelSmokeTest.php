@@ -81,17 +81,24 @@ final class KernelSmokeTest extends WebTestCase
         }
     }
 
-    public function test_an_unknown_path_is_a_404_rather_than_a_panic(): void
+    /**
+     * The session route is real, and asking for it with the wrong method is a
+     * clean refusal rather than a 500. (An unknown path is covered in
+     * `BrokerTokenGateTest`, where the interesting property is that it answers
+     * 401 without a token and 404 with one.).
+     */
+    public function test_an_existing_route_with_the_wrong_method_is_a_clean_refusal(): void
     {
         /** @var KernelBrowser $client */
         $client = self::createClient();
 
-        $client->request('GET', '/v1/sessions');
+        $client->request('GET', '/v1/sessions', [], [], ['HTTP_AUTHORIZATION' => 'Bearer test-token']);
 
         self::assertSame(
-            Response::HTTP_NOT_FOUND,
+            Response::HTTP_METHOD_NOT_ALLOWED,
             $client->getResponse()->getStatusCode(),
-            'the session API does not exist yet, and its absence must be a clean 404',
+            'the route exists for POST; GET must be a 405 with an Allow header, not a crash',
         );
+        self::assertStringContainsString('POST', (string) $client->getResponse()->headers->get('Allow'));
     }
 }

@@ -27,14 +27,8 @@ use App\Session\SessionName;
  */
 final class ContainerSpec
 {
-    public const string CREATED_BY = 'work-warp';
-    public const string LABEL_CREATED_BY = 'ww.created-by';
-    public const string LABEL_SESSION = 'ww.session';
-    public const string LABEL_KIND = 'ww.kind';
-    public const string LABEL_TTL = 'ww.ttl';
     public const string WORKSPACE_MOUNT = '/workspace';
     public const string SESSION_ENV = 'WW_SESSION';
-    public const string KIND_CMD = 'cmd';
 
     /**
      * @return array<string, mixed>
@@ -134,13 +128,13 @@ final class ContainerSpec
     public static function labels(SessionName $session, ExecRequest $request, Limits $limits): array
     {
         return [
-            self::LABEL_CREATED_BY => self::CREATED_BY,
-            self::LABEL_SESSION => $session->value,
-            self::LABEL_KIND => self::KIND_CMD,
+            Labels::LABEL_CREATED_BY => Labels::CREATED_BY,
+            Labels::LABEL_SESSION => $session->value,
+            Labels::LABEL_KIND => Labels::KIND_CMD,
 
             // The request's own timeout plus a grace period: what the janitor
             // enforces if the broker never gets to reap it.
-            self::LABEL_TTL => (string) ($request->timeout + $limits->ttlGrace),
+            Labels::LABEL_TTL => (string) ($request->timeout + $limits->ttlGrace),
         ];
     }
 }
