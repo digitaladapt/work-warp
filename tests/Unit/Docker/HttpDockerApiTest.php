@@ -282,6 +282,68 @@ final class HttpDockerApiTest extends TestCase
         $this->api(new MockHttpClient(new MockResponse('')))->containerLogs('abc123', 0);
     }
 
+    public function test_network_lookup_maps_200_and_404_to_a_question_answered(): void
+    {
+        $found = $this->api($this->client(static fn (): MockResponse => new MockResponse('{"Name":"ww-net-refactor"}')));
+
+        self::assertTrue($found->networkExists('ww-net-refactor'));
+        self::assertSame('http://lyra-dockerproxy:2375/networks/ww-net-refactor', $this->requests[0]['url']);
+
+        $missing = $this->api($this->client(static fn (): MockResponse => new MockResponse('{"message":"no such network"}', ['http_code' => 404])));
+
+        self::assertFalse($missing->networkExists('ww-net-refactor'));
+
+        $angry = $this->api($this->client(static fn (): MockResponse => new MockResponse('{"message":"daemon is unhappy"}', ['http_code' => 500])));
+
+        try {
+            $angry->networkExists('ww-net-refactor');
+            self::fail('a lookup the daemon refused must not be read as "no"');
+        } catch (DockerRefused $e) {
+            self::assertStringContainsString('look up the session network', $e->getMessage());
+        }
+    }
+
+    public function test_it_creates_a_session_network_with_the_labels_it_was_given(): void
+    {
+        $api = $this->api($this->client(static fn (): MockResponse => new MockResponse('{"Id":"net1"}', ['http_code' => 201])));
+
+        $api->createNetwork('ww-net-refactor', [
+            'ww.created-by' => 'work-warp',
+            'ww.session' => 'refactor',
+            'ww.kind' => 'network',
+        ]);
+
+        self::assertSame('POST', $this->requests[0]['method']);
+        self::assertSame('http://lyra-dockerproxy:2375/networks/create', $this->requests[0]['url']);
+        self::assertSame(
+            [
+                'Name' => 'ww-net-refactor',
+                'Labels' => [
+                    'ww.created-by' => 'work-warp',
+                    'ww.session' => 'refactor',
+                    'ww.kind' => 'network',
+                ],
+            ],
+            json_decode((string) $this->requests[0]['options']['body'], true, flags: \JSON_THROW_ON_ERROR),
+        );
+    }
+
+    public function test_a_refused_network_create_keeps_the_daemons_words(): void
+    {
+        $api = $this->api($this->client(static fn (): MockResponse => new MockResponse(
+            '{"message":"network with name ww-net-refactor already exists"}',
+            ['http_code' => 409],
+        )));
+
+        try {
+            $api->createNetwork('ww-net-refactor', []);
+            self::fail('a refused create must not pass silently');
+        } catch (DockerRefused $e) {
+            self::assertStringContainsString('create the session network', $e->getMessage());
+            self::assertStringContainsString('already exists', $e->getMessage());
+        }
+    }
+
     public function test_it_creates_a_workspace_volume_with_the_labels_it_was_given(): void
     {
         $api = $this->api($this->client(static fn (): MockResponse => new MockResponse('{"Name":"ww-ws-refactor"}', ['http_code' => 201])));

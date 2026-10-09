@@ -6,54 +6,49 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-
-- **`deploy/compose.yaml` now states what the host actually runs.** The stack was
-  rolled out on 2026-10-07 as a working-tree change on the host; the repo copy
-  still described the pre-rollout topology (terminal sharing the proxy's network,
-  `DOCKER_HOST` pointed at the proxy, `:latest` on the proxy image, the network
-  called `lyra-control`). The preserved host diff is now applied: `lyra-terminal`
-  is on `public` + `api` with **no `DOCKER_HOST`**, networks are `backend` and
-  `api`, and the proxy is pinned to `tecnativa/docker-socket-proxy:v0.5.0` — the
-  version every measurement in `deploy/README.md` was taken against.
-
-  `deploy/README.md` was swept to match: the rollout is recorded as executed
-  rather than proposed, the two settled decisions (image pin, network rename) are
-  marked done, the safeguards table no longer claims `cap_drop: ALL` or
-  `no-new-privileges` on the proxy — measured null, and never in the file — and
-  the open questions now say which were answered on 2026-10-07. The same sweep
-  hit `docs/design/`: §0b/§0e of `DOCKER-ACCESS.md` and §10 of `PLAN.md` now
-  record the resolutions instead of asking for them.
-
 ### Added
 
-- **The broker's request vocabulary, and the one place a container is
-  assembled.** `src/Exec/ExecRequest.php` is typed input with construction as
-  the authority: an invalid request cannot exist as an object, so the rest of
-  the codebase does not re-check it. `src/Docker/ContainerSpec.php` builds the
-  `containers/create` payload field by field from that input — which is the
-  whole security argument, expressed as a test rather than a paragraph — and
-  `src/Session/SessionName.php` is the only source of the resource names a
-  session owns, so the `ww-` prefix is generated rather than supplied.
+- **`exec` — the 95% win (DOCKER-ACCESS.md §10 step 2).**
+  `POST /v1/sessions/{name}/exec` runs one command in one ephemeral container
+  and returns `{exit_code, stdout, stderr, truncated, timed_out}`. The
+  lifecycle is `ExecRunner`'s and follows the design's order: the session must
+  already exist (a mistyped name is a `404`, never a new durable object), a
+  slot is held for the whole run, the session's network is created lazily the
+  first time a command asks to reach it, the container is built by
+  `ContainerSpec` and started, the broker waits against its own deadline,
+  kills at expiry, reads the capped logs, and removes the container before
+  the slot goes back.
 
-  `cmd` stays an arbitrary **argv array**. That is load-bearing in both
-  directions: the container is what is constrained, and a schema that forced
-  `"cd x && npm test"` back into a single string would reintroduce shell parsing
-  to the one field where an argument could be reinterpreted.
+  Two choices are load-bearing and deliberate. **Polling rather than a
+  blocking wait**: `POST /containers/{id}/wait` would hold a request open for
+  the length of a test suite and hand the timeout to whatever client happened
+  to be in the middle; the loop polls the injected clock instead, which keeps
+  the deadline the broker's and the loop testable in microseconds. **A hard
+  kill at the deadline**: a command that outran its timeout is over, the exit
+  code says how (137), and `timed_out: true` says why — a timeout is a `200`
+  with a flag, not a `5xx`, because a killed command ran.
 
-- **The Symfony 8.1 / PHP 8.5 bootstrap**, per the house structure and the
-  FrankenPHP base image: composer manifests, config, the canonical vendored
-  config leaves, a multi-stage Dockerfile, Caddy config, php.ini and entrypoint.
-  Health and readiness are split — `/health` touches nothing, `/ready` reports
-  whether Docker is configured at all.
+  The failure vocabulary is the one the session endpoint established, extended
+  where the design already said what it means: `404` no such session, `422`
+  anything inexpressible (`SessionName` / `ExecRequest`), `429` when every slot
+  is taken (the broker does not queue, §6b), `501` for `stdin`, `503`/`502`
+  for the daemon unreachable / refusing.
 
-- **PHPStan level 6 with an empty baseline**, php-cs-fixer, PHPUnit and
-  `composer audit` — all green, all wired to the shared CI workflow.
+- **`stdin` is refused with `501`, on purpose, and the field stays.**
+  Delivering it needs the daemon's connection-hijacking `attach` path
+  (Docker's own spec: the request upgrades and the socket goes raw), which the
+  broker's HTTP client does not implement. The alternative was worse: a
+  broker that accepted `stdin` and silently ran the command without it looks
+  like a command that read an empty file. The refusal names the workaround
+  (a file in the workspace) and the field keeps its validation, so lifting
+  this is connection-hijack support rather than an API change.
 
-- `.env.example` and `.env.test` with every variable documented inline;
-  `.env` is never committed.
-
-### Added
+- **The pager guard is the broker's, and the caller cannot take it.**
+  `PAGER=cat GIT_PAGER=cat TERM=dumb NO_COLOR=1 CI=1` are stamped on every
+  command — PLAN.md §5.1's direct fix for the three-day-old pagers — and the
+  names are now *refused* in a request's `env`: "who wins when a variable is
+  duplicated" is decided differently by each libc (glibc's `getenv` returns
+  the first match), and a guard that can be overridden is not a guard.
 
 - **The exec budget, enforced by the filesystem rather than by a counter.**
   `App\Exec\Slots` is a pool of N file locks — one slot per permitted concurrent
@@ -72,11 +67,11 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - **The Docker client, as a seam.** `App\Docker\DockerApi` is the whole of what
   the broker can ask the daemon to do — create from a name and a payload
   somebody else assembled, start, inspect, kill, remove, logs, and the
-  workspace volume — with no raw-endpoint escape hatch, so the shape of the
-  door is part of the vocabulary. `HttpDockerApi` is the real one, and
-  `config/services_test.yaml` swaps in a scripted double: CI has no daemon, and
-  the integration tests assert what the broker *asked Docker to do* rather than
-  what it reached.
+  workspace volume and session network — with no raw-endpoint escape hatch, so
+  the shape of the door is part of the vocabulary. `HttpDockerApi` is the real
+  one, and `config/services_test.yaml` swaps in a scripted double: CI has no
+  daemon, and the integration tests assert what the broker *asked Docker to
+  do* rather than what it reached.
 
   Failures leave as two typed shapes, deliberately: `DockerUnavailable`
   (nothing was asked; `503`) and `DockerRefused` (asked and told no, in the
@@ -108,6 +103,61 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   broker would accept anonymous callers while claiming to be the only thing
   holding the Docker credential. `/health` and `/ready` stay open — they touch
   nothing.
+
+- **The broker's request vocabulary, and the one place a container is
+  assembled.** `src/Exec/ExecRequest.php` is typed input with construction as
+  the authority: an invalid request cannot exist as an object, so the rest of
+  the codebase does not re-check it. `src/Docker/ContainerSpec.php` builds the
+  `containers/create` payload field by field from that input — which is the
+  whole security argument, expressed as a test rather than a paragraph — and
+  `src/Session/SessionName.php` is the only source of the resource names a
+  session owns, so the `ww-` prefix is generated rather than supplied.
+
+  `cmd` stays an arbitrary **argv array**. That is load-bearing in both
+  directions: the container is what is constrained, and a schema that forced
+  `"cd x && npm test"` back into a single string would reintroduce shell parsing
+  to the one field where an argument could be reinterpreted.
+
+- **The Symfony 8.1 / PHP 8.5 bootstrap**, per the house structure and the
+  FrankenPHP base image: composer manifests, config, the canonical vendored
+  config leaves, a multi-stage Dockerfile, Caddy config, php.ini and entrypoint.
+  Health and readiness are split — `/health` touches nothing, `/ready` reports
+  whether Docker is configured at all.
+
+- **PHPStan level 6 with an empty baseline**, php-cs-fixer, PHPUnit and
+  `composer audit` — all green, all wired to the shared CI workflow.
+
+- `.env.example` and `.env.test` with every variable documented inline;
+  `.env` is never committed.
+
+### Changed
+
+- **`Limits` carries the output cap** (`outputByteCap`, 1 MiB per stream). It
+  is policy, like every other field there, and the reader stops at it rather
+  than draining and discarding. Per stream, not per command: a command that
+  fills both streams is two facts.
+
+- **`docker/php.ini` sets `max_execution_time = 0`.** A command may run for
+  hours, and the SAPI default of 30 s would turn every long run into a
+  truncated request. The bound that matters is the request's own timeout plus
+  the kill grace, and `ExecRunner` enforces it.
+
+- **`deploy/compose.yaml` now states what the host actually runs.** The stack was
+  rolled out on 2026-10-07 as a working-tree change on the host; the repo copy
+  still described the pre-rollout topology (terminal sharing the proxy's network,
+  `DOCKER_HOST` pointed at the proxy, `:latest` on the proxy image, the network
+  called `lyra-control`). The preserved host diff is now applied: `lyra-terminal`
+  is on `public` + `api` with **no `DOCKER_HOST`**, networks are `backend` and
+  `api`, and the proxy is pinned to `tecnativa/docker-socket-proxy:v0.5.0` — the
+  version every measurement in `deploy/README.md` was taken against.
+
+  `deploy/README.md` was swept to match: the rollout is recorded as executed
+  rather than proposed, the two settled decisions (image pin, network rename) are
+  marked done, the safeguards table no longer claims `cap_drop: ALL` or
+  `no-new-privileges` on the proxy — measured null, and never in the file — and
+  the open questions now say which were answered on 2026-10-07. The same sweep
+  hit `docs/design/`: §0b/§0e of `DOCKER-ACCESS.md` and §10 of `PLAN.md` now
+  record the resolutions instead of asking for them.
 
 ### Fixed
 

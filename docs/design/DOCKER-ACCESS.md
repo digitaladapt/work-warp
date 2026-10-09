@@ -316,6 +316,16 @@ POST /v1/sessions/refactor/exec
 | `env` | `map<string,string>` | keys `^[A-Za-z_][A-Za-z0-9_]*$`, capped count and value length |
 | `stdin` | `string` | capped bytes |
 
+**`stdin` note, added 2026-10-09 when `exec` landed.** The field stays in the
+vocabulary — validated and capped like everything else — but delivering it
+requires the daemon's connection-hijacking `attach` path (Docker's spec:
+the request upgrades and the connection goes raw), which the broker's HTTP
+client does not implement. Rather than accepting input and silently running
+the command without it, the endpoint refuses a request carrying `stdin` with
+`501` and names the workaround (write it to a file in the workspace). This is
+a statement about the build, not about the shape of the API: lifting it is
+connection-hijack support, not an API change.
+
 Two notes on `env`, because it is newly expressible and therefore newly a
 decision. It is the *container's* environment, which is not the sensitive thing —
 the `CONTAINERS: 1` problem is the *host's* environment. But the broker must pass

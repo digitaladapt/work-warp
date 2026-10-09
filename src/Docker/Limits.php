@@ -37,6 +37,17 @@ final class Limits
          */
         public readonly string $user = '1000:1000',
         public readonly array $tmpfs = ['/tmp' => 'rw,noexec,nosuid,size=64m'],
+        /**
+         * How many bytes of each stream (`stdout` and `stderr`) are kept. The
+         * reader stops at the cap rather than draining and discarding, and
+         * the result carries `truncated` so a partial log cannot be mistaken
+         * for a whole one (DOCKER-ACCESS.md §5, PLAN.md §5.1).
+         *
+         * Per stream, not per command: a command that fills both streams with
+         * different content is two facts, and halving each to fit one budget
+         * would cut the useful one to pay for the noisy one.
+         */
+        public readonly int $outputByteCap = 1_048_576,
     ) {
     }
 

@@ -222,6 +222,35 @@ final class HttpDockerApi implements DockerApi
     }
 
     #[Override]
+    public function networkExists(string $name): bool
+    {
+        $response = $this->call('GET', '/networks/'.$this->segment($name));
+        $status = $this->status($response);
+
+        if (200 === $status) {
+            return true;
+        }
+
+        if (404 === $status) {
+            return false;
+        }
+
+        throw $this->refused('look up the session network', $response);
+    }
+
+    #[Override]
+    public function createNetwork(string $name, array $labels): void
+    {
+        $response = $this->call('POST', '/networks/create', [
+            'json' => ['Name' => $name, 'Labels' => $labels],
+        ]);
+
+        if (201 !== $this->status($response)) {
+            throw $this->refused('create the session network', $response);
+        }
+    }
+
+    #[Override]
     public function createVolume(string $name, array $labels): void
     {
         $response = $this->call('POST', '/volumes/create', [

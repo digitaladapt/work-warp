@@ -41,6 +41,29 @@ final class ExecRequest
     public const string RESERVED_ENV_PREFIX = 'WW_';
 
     /**
+     * Environment the broker sets on every command, and the caller cannot
+     * touch.
+     *
+     * These five are PLAN.md §5.1's direct fix for the failure that started
+     * this project: a command that believes it has a human terminal opens a
+     * pager and waits for keystrokes that never come. The guard only works if
+     * it is not overridable — and "who wins" between two copies of the same
+     * variable is not something to leave to the libc (glibc's `getenv`
+     * returns the *first* match, so a caller's earlier copy would beat the
+     * broker's later one). So the names are refused outright rather than
+     * deduplicated, in the same spirit as `WW_`.
+     *
+     * @var array<string, string>
+     */
+    public const array BROKER_OWNED_ENV = [
+        'PAGER' => 'cat',
+        'GIT_PAGER' => 'cat',
+        'TERM' => 'dumb',
+        'NO_COLOR' => '1',
+        'CI' => '1',
+    ];
+
+    /**
      * Anchored with `\z` rather than `$`: in PCRE, `$` also matches before a
      * trailing newline, so `/…$/` would accept "PATH\n" as an environment key.
      */
@@ -180,6 +203,10 @@ final class ExecRequest
 
             if (str_starts_with($name, self::RESERVED_ENV_PREFIX)) {
                 throw InvalidExecRequest::because(\sprintf('env keys beginning with %s are reserved for the broker, got "%s"', self::RESERVED_ENV_PREFIX, $name));
+            }
+
+            if (\array_key_exists($name, self::BROKER_OWNED_ENV)) {
+                throw InvalidExecRequest::because(\sprintf('env["%s"] is owned by the broker, which sets %s on every command so a pager can never wait for a terminal that is not there (PLAN.md §5.1); use a different variable', $name, implode(', ', array_map(static fn (string $key, string $value): string => $key.'='.$value, array_keys(self::BROKER_OWNED_ENV), self::BROKER_OWNED_ENV))));
             }
 
             if (!\is_string($entry)) {

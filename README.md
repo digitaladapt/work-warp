@@ -88,9 +88,12 @@ What exists today:
 - `src/Exec/`, `src/Session/`, `src/Docker/` — the typed request vocabularies
   and the one function that assembles a container-create payload, with the tests
   that hold them to it. `src/Docker/` also holds the client (`DockerApi` and
-  `HttpDockerApi`, including the demultiplexing, capped log reader) and
+  `HttpDockerApi`, including the demultiplexing, capped log reader).
   `src/Session/SessionController.php` serves `POST /v1/sessions` — a session
-  and its labelled workspace volume, with ensure semantics.
+  and its labelled workspace volume, with ensure semantics — and
+  `src/Exec/ExecController.php` + `ExecRunner.php` serve
+  `POST /v1/sessions/{name}/exec`: one ephemeral container per command, a slot
+  held for the run, a hard deadline, demultiplexed capped output.
 - The `/v1` **bearer gate**, checked before routing: everything under `/v1`
   needs `WW_TOKEN`, and an unset token refuses rather than allowing.
 - `src/Health/` — liveness and readiness.
@@ -98,11 +101,12 @@ What exists today:
 - The full quality gate: php-cs-fixer, PHPStan (level 6, empty baseline),
   PHPUnit, `composer audit`.
 
-What does not exist yet: the rest of the HTTP API (`exec`, `build`, `ps`,
-`reap`, and the remaining session endpoints), the janitor, the command image
-(`workwarp-base` — nothing runs end to end until it exists), and the MCP
-surface. See DOCKER-ACCESS.md §10 for the build order and §10e for the
-decisions still open.
+What does not exist yet: the rest of the HTTP API (`build`, `ps`, `reap`, and
+`GET`/`DELETE` for sessions), the janitor, `stdin` delivery for `exec` (needs
+connection hijacking — currently a `501`), the command image (`workwarp-base`
+— nothing runs end to end until it exists), and the MCP surface. See
+DOCKER-ACCESS.md §10 for the build order and §10e for the decisions still
+open.
 
 ## Development
 

@@ -104,8 +104,13 @@ final class ContainerSpec
     }
 
     /**
-     * The container's environment: what the caller declared, plus the one
-     * variable the broker adds, and nothing else.
+     * The container's environment: what the caller declared, then the
+     * broker's own — `WW_SESSION`, and the five variables that keep a
+     * captured output channel from behaving like a terminal.
+     *
+     * The caller cannot collide with the broker's copy: those names are
+     * refused at request construction (ExecRequest::BROKER_OWNED_ENV), so the
+     * list below is the only source of them and ordering cannot matter.
      *
      * @return list<string>
      */
@@ -118,6 +123,10 @@ final class ContainerSpec
         }
 
         $env[] = self::SESSION_ENV.'='.$session->value;
+
+        foreach (ExecRequest::BROKER_OWNED_ENV as $name => $value) {
+            $env[] = $name.'='.$value;
+        }
 
         return $env;
     }
