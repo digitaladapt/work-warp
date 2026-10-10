@@ -46,3 +46,8 @@ Dockerfile
 .dockerignore
 .php-version
 *.md
+
+# The command image is a target of its own, built from ww-base/. Keeping it
+# out of the broker's context stops a Dockerfile-only change from moving the
+# broker image's cache key.
+ww-base

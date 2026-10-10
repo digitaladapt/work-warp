@@ -37,7 +37,7 @@ final class HttpDockerApiTest extends TestCase
     {
         $api = $this->api($this->client(static fn (): MockResponse => new MockResponse('{"Id":"abc123"}', ['http_code' => 201])));
 
-        $id = $api->createContainer('ww-demo-abc123', ['Image' => 'workwarp-base:test', 'Cmd' => ['true']]);
+        $id = $api->createContainer('ww-demo-abc123', ['Image' => 'digitaladapt/work-warp:test-base', 'Cmd' => ['true']]);
 
         self::assertSame('abc123', $id);
         self::assertCount(1, $this->requests);
@@ -47,7 +47,7 @@ final class HttpDockerApiTest extends TestCase
             $this->requests[0]['url'],
         );
         self::assertSame(
-            ['Image' => 'workwarp-base:test', 'Cmd' => ['true']],
+            ['Image' => 'digitaladapt/work-warp:test-base', 'Cmd' => ['true']],
             json_decode((string) $this->requests[0]['options']['body'], true, flags: \JSON_THROW_ON_ERROR),
         );
         self::assertContains(
@@ -71,7 +71,7 @@ final class HttpDockerApiTest extends TestCase
     public function test_a_refusal_carries_the_daemons_own_words(): void
     {
         $api = $this->api($this->client(static fn (): MockResponse => new MockResponse(
-            '{"message":"No such image: workwarp-base:test"}',
+            '{"message":"No such image: digitaladapt/work-warp:test-base"}',
             ['http_code' => 404],
         )));
 
@@ -81,7 +81,7 @@ final class HttpDockerApiTest extends TestCase
         } catch (DockerRefused $e) {
             self::assertStringContainsString('create the container', $e->getMessage());
             self::assertStringContainsString('404', $e->getMessage());
-            self::assertStringContainsString('No such image: workwarp-base:test', $e->getMessage());
+            self::assertStringContainsString('No such image: digitaladapt/work-warp:test-base', $e->getMessage());
         }
     }
 

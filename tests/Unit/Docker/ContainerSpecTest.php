@@ -220,7 +220,7 @@ final class ContainerSpecTest extends TestCase
     /**
      * @return array<string, mixed>
      */
-    private function payload(ExecRequest $request, string $image = 'workwarp-base:latest'): array
+    private function payload(ExecRequest $request, string $image = 'digitaladapt/work-warp:test-base'): array
     {
         return ContainerSpec::payload(
             $image,

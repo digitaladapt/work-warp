@@ -162,7 +162,7 @@ final class SessionApiTest extends WebTestCase
     public function test_a_daemon_that_refuses_is_502_and_keeps_the_daemons_words(): void
     {
         $client = self::createClient();
-        $this->docker()->failNext('createVolume', DockerRefused::because('No such image: workwarp-base:test'));
+        $this->docker()->failNext('createVolume', DockerRefused::because('No such image: digitaladapt/work-warp:test-base'));
 
         $this->post($client, '/v1/sessions', ['name' => 'refactor']);
 

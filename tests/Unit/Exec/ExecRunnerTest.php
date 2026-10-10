@@ -221,7 +221,7 @@ final class ExecRunnerTest extends TestCase
 
         /** @var array<string, mixed> $payload */
         $payload = $create['payload'];
-        self::assertSame('workwarp-base:test', $payload['Image']);
+        self::assertSame('digitaladapt/work-warp:test-base', $payload['Image']);
         self::assertSame(['npm', 'test'], $payload['Cmd']);
 
         /** @var array<string, mixed> $hostConfig */
@@ -265,7 +265,7 @@ final class ExecRunnerTest extends TestCase
         $docker = new ScriptedDockerApi();
         $slots = Slots::of(2, new InMemoryStore());
         $clock = new FakeClock();
-        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'workwarp-base:test', 300);
+        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
 
         if ($createSession) {
             $docker->createVolume('ww-ws-demo', ['ww.session' => 'demo']);

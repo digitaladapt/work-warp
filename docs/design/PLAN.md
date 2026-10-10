@@ -213,9 +213,9 @@ short-lived, my ability to add a PHP extension vanishes"* — dissolves once
 **The safety valve is the ability to build an image, not `sudo`.** "We need the
 INTL extension" is a Dockerfile line and a cheap rebuild. If a session genuinely
 needs something ad hoc mid-flight, it may derive a private tag
-(`workwarp-base:<session>`) that it is free to abuse. The shared base stays
-clean, the session keeps its flexibility, and the snowflake is disposable by
-construction.
+(`digitaladapt/work-warp:<session>`) that it is free to abuse. The shared base
+stays clean, the session keeps its flexibility, and the snowflake is
+disposable by construction.
 
 ### 6.2 The ledger
 
@@ -527,3 +527,5 @@ the task-loom e2e in §9 becomes a normal operation rather than a manual one.
 | 2026-10-08 | Source lives in `src/` in this repo, not a second repo: the broker and `ww-run` are two ends of one protocol, and it is one application. |
 | 2026-10-08 | The exec cap is per **workspace**, not per session — the workspace is what contends. Today one session creates one workspace, so they coincide; they stop coinciding when a session may name an existing workspace. Enforced as a pool of file locks (N slots), because `FlockStore` is a mutex and a counter is a lie after a crash. |
 | 2026-10-08 | `deploy/compose.yaml` is reconciled with the running stack: the preserved host-side rollout diff is applied (terminal off the proxy network with `DOCKER_HOST` removed, networks `backend`/`api`, proxy pinned to `v0.5.0`). The host is the fact; the file now agrees with it. |
+| 2026-10-10 | The command image is `ww-base/` in this repo, published by the same bake run as the broker as `:<TAG>-base` — one repository, two roles, the task-weaver convention. |
+| 2026-10-10 | The command image ships `/workspace` owned by `1000:1000`. A fresh volume becomes writable only because the daemon's volume-population step copies that ownership from the image into the empty volume (containerd `fs.copyFileInfo`); commands run as uid 1000 against a read-only rootfs, so nothing else can chown it. |

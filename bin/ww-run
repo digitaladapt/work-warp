@@ -27,7 +27,7 @@
 #
 # Environment:
 #   WW_SESSION    session name (default: default). Names the workspace volume.
-#   WW_IMAGE      image to run (default: ww-base:latest)
+#   WW_IMAGE      image to run (default: digitaladapt/work-warp:latest-base)
 #   WW_TTL        seconds before the janitor may stop it (default: 1800)
 #   WW_MAX_JOBS   concurrent ww- containers allowed (default: 2)
 #   DOCKER_HOST   host or proxy to talk to; unset in the current stack, which
@@ -37,7 +37,7 @@
 set -euo pipefail
 
 WW_SESSION="${WW_SESSION:-default}"
-WW_IMAGE="${WW_IMAGE:-ww-base:latest}"
+WW_IMAGE="${WW_IMAGE:-digitaladapt/work-warp:latest-base}"
 WW_TTL="${WW_TTL:-1800}"
 WW_MAX_JOBS="${WW_MAX_JOBS:-2}"
 WW_LABEL_OWNER="ww.created-by=work-warp"

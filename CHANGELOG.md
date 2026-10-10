@@ -8,6 +8,34 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The command image, `ww-base/` — the half of step 2 that was missing.**
+  The design's "nothing runs end to end until it exists" image: Debian
+  trixie-slim plus a general toolset (git and openssh-client, the archive
+  family, Python 3 with its full standard library *and* `venv`, dig and ping,
+  jq, less, file, rsync), built and published by the same bake run as the
+  broker (`docker-bake.hcl`, target `base`) as suffixed tags of the same
+  repository — `:develop-base` on a push to main, `:latest-base` and
+  `:<version>-base` on a release.
+
+  Two properties are load-bearing rather than convenient. **`/workspace`
+  ships owned by `1000:1000`**: commands run as that uid against a read-only
+  rootfs and nothing inside a container can chown, so a fresh volume becomes
+  writable only because the daemon's volume-population step copies the image
+  directory into the empty volume and brings its ownership along (traced to
+  `fs.copyFileInfo` in containerd/continuity). Ship it root-owned and every
+  session's first command dies on a permission error that looks like a broker
+  bug. And **no default command** — `ENTRYPOINT []` and `CMD []` clear
+  `debian:trixie-slim`'s inherited `Cmd: ["bash"]`, so a bare create is
+  refused instead of quietly starting a shell nobody asked for.
+
+  The daemon-free parts of that contract are a test
+  (`tests/Unit/Image/CommandImageTest.php`: ownership, empty defaults,
+  publication tags, the committed `WW_IMAGE`); the parts only a daemon can
+  answer are `ww-base/smoke.sh`, which runs the production shape
+  (`--read-only`, `--cap-drop=ALL`, `--no-new-privileges`, `--network none`,
+  uid 1000) against a **fresh** volume — the only way to exercise volume
+  population.
+
 - **`exec` — the 95% win (DOCKER-ACCESS.md §10 step 2).**
   `POST /v1/sessions/{name}/exec` runs one command in one ephemeral container
   and returns `{exit_code, stdout, stderr, truncated, timed_out}`. The
@@ -131,6 +159,13 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   `.env` is never committed.
 
 ### Changed
+
+- **`WW_IMAGE` now names the tag that is actually published.** The default was
+  `workwarp-base:latest` — a repository that was never built — and `bin/ww-run`
+  fell back to `ww-base:latest`, which was never built either. The default is
+  now `digitaladapt/work-warp:latest-base` in `.env.example`,
+  `config/services.yaml` and `bin/ww-run`, and the tests that pin an image
+  name were swept to match.
 
 - **`Limits` carries the output cap** (`outputByteCap`, 1 MiB per stream). It
   is policy, like every other field there, and the reader stops at it rather
