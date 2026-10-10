@@ -756,6 +756,13 @@ the cheapest durable thing and still no Docker needed. `POST
 timeout, output caps. At this point the product works and is usefully different
 from today.
 
+**Landed, with its other half.** `exec` merged 2026-10-09; the command image
+(`ww-base/`) is the half that makes it run against a real daemon rather than
+the scripted seam. Its two load-bearing properties — `/workspace` owned by
+`1000:1000`, no default command — and the checks that hold them are in
+`ww-base/README.md`; the writability check needs a daemon and lives in
+`ww-base/smoke.sh`.
+
 **Step 3 — the janitor and `reap`.** TTL labels are already written; this is the
 thing that reads them. This is where "cannot sit there forever" becomes true even
 when the broker is dead.

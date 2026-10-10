@@ -98,15 +98,18 @@ What exists today:
   needs `WW_TOKEN`, and an unset token refuses rather than allowing.
 - `src/Health/` — liveness and readiness.
 - The FrankenPHP image, Caddy config, php.ini and entrypoint.
+- **The command image** (`ww-base/`) — what a command container is made of:
+  Debian trixie-slim and a general toolset, uid 1000 owning `/workspace`, no
+  default command. Published by the same bake run as the broker as
+  `:<TAG>-base` (`:develop-base`, `:latest-base`).
 - The full quality gate: php-cs-fixer, PHPStan (level 6, empty baseline),
   PHPUnit, `composer audit`.
 
 What does not exist yet: the rest of the HTTP API (`build`, `ps`, `reap`, and
 `GET`/`DELETE` for sessions), the janitor, `stdin` delivery for `exec` (needs
-connection hijacking — currently a `501`), the command image (`workwarp-base`
-— nothing runs end to end until it exists), and the MCP surface. See
-DOCKER-ACCESS.md §10 for the build order and §10e for the decisions still
-open.
+connection hijacking — currently a `501`), and the MCP surface. See
+DOCKER-ACCESS.md §10 for the build order; `ww-base/README.md` records the
+command image's contract and how to check it.
 
 ## Development
 

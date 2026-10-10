@@ -188,7 +188,7 @@ final class ExecApiTest extends WebTestCase
         $this->exec($client, 'refactor', ['cmd' => ['true']]);
         self::assertSame(Response::HTTP_SERVICE_UNAVAILABLE, $client->getResponse()->getStatusCode());
 
-        $this->docker()->failNext('createContainer', DockerRefused::because('No such image: workwarp-base:test'));
+        $this->docker()->failNext('createContainer', DockerRefused::because('No such image: digitaladapt/work-warp:test-base'));
         $this->exec($client, 'refactor', ['cmd' => ['true']]);
         self::assertSame(Response::HTTP_BAD_GATEWAY, $client->getResponse()->getStatusCode());
         self::assertStringContainsString('No such image', (string) $this->decode($client)['reason']);

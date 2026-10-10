@@ -1,0 +1,8 @@
+# .dockerignore — the command image's context is a Dockerfile and nothing else.
+#
+# The build has no COPY, so nothing in this directory is image content. Keeping
+# the context this small also keeps the target's cache key from moving when
+# only the documentation or the smoke script changes.
+README.md
+smoke.sh
+.dockerignore

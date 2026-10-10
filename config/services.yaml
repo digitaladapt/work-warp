@@ -7,7 +7,7 @@ parameters:
     env(LOCK_DSN): 'flock'
     env(WW_DOCKER_HOST): ''
     env(WW_TOKEN): ''
-    env(WW_IMAGE): 'workwarp-base:latest'
+    env(WW_IMAGE): 'digitaladapt/work-warp:latest-base'
     env(WW_MAX_CONCURRENCY): '2'
     env(WW_TTL_GRACE): '300'
 
@@ -17,7 +17,9 @@ parameters:
     # in this family follow for their upstreams).
     docker_host: '%env(WW_DOCKER_HOST)%'
 
-    # The image command containers are created from. Configuration, never input.
+    # The image command containers are created from. Configuration, never
+    # input; published as `:<TAG>-base` by the same bake run as the broker
+    # (ww-base/).
     command_image: '%env(WW_IMAGE)%'
 
     # How many commands may run at once in one workspace. Replaces ww-run's
