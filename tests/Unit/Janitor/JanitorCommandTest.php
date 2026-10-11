@@ -11,8 +11,8 @@ use App\Exec\Slots;
 use App\Janitor\Janitor;
 use App\Janitor\JanitorCommand;
 use App\Janitor\LedgerWriter;
-use App\Tests\Support\FakeClock;
 use App\Tests\Support\ScriptedDockerApi;
+use App\Tests\Support\SleepingClock;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 use Symfony\Component\Console\Command\Command;
@@ -99,20 +99,71 @@ final class JanitorCommandTest extends TestCase
         self::assertStringContainsString('whole number of seconds', $tester->getDisplay());
     }
 
+    public function test_a_stop_signal_honoured_before_the_first_sweep_stops_the_loop_without_sweeping(): void
+    {
+        [$docker, $tester, $command] = $this->mount();
+        $docker->seedContainer('id-stopped', 'ww-demo-abc123', false, self::NOW - 400, $this->labels());
+
+        // `handleSignal` is what a SIGTERM or SIGINT becomes. Called before
+        // execute, the loop must skip entirely — a stop asked for before the
+        // work began means no work.
+        self::assertFalse($command->handleSignal(\SIGTERM), 'the signal handler must let execution continue to the check');
+
+        self::assertSame(Command::SUCCESS, $tester->execute(['--every' => '60']));
+        self::assertStringContainsString('janitor stopped', $tester->getDisplay());
+        self::assertSame([], $docker->calledMethods(), 'nothing may be swept after a stop was requested');
+    }
+
+    public function test_the_loop_sweeps_then_stops_when_a_signal_arrives_during_the_wait(): void
+    {
+        [$docker, $tester] = $this->mount(stopAfterFirstSleep: true);
+        $docker->seedContainer('id-stopped', 'ww-demo-abc123', false, self::NOW - 400, $this->labels());
+
+        self::assertSame(Command::SUCCESS, $tester->execute(['--every' => '5']));
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('sweeping every 5 seconds', $display);
+        self::assertStringContainsString('inspected 1, reaped 1, failed 0', $display);
+        self::assertStringContainsString('janitor stopped', $display);
+
+        // One sweep's worth of work — and the wait happened between sweeps,
+        // not in a busy loop: the fake clock reports what it was asked for.
+        self::assertSame(['listContainers', 'removeContainer', 'volumeExists'], $docker->calledMethods());
+    }
+
+    public function test_a_sweep_that_cannot_run_is_a_warning_in_the_loop_not_an_exit(): void
+    {
+        [$docker, $tester] = $this->mount(stopAfterFirstSleep: true);
+        $docker->failNext('listContainers', DockerUnavailable::because('the proxy is not answering'));
+
+        // The loop's whole value is being there later: a dead daemon now must
+        // not stop the janitor from sweeping when it comes back.
+        self::assertSame(Command::SUCCESS, $tester->execute(['--every' => '5']));
+        self::assertStringContainsString('sweep skipped', $tester->getDisplay());
+        self::assertStringContainsString('janitor stopped', $tester->getDisplay());
+    }
+
     /**
-     * @return array{ScriptedDockerApi, CommandTester}
+     * @return array{ScriptedDockerApi, CommandTester, JanitorCommand}
      */
-    private function mount(): array
+    private function mount(bool $stopAfterFirstSleep = false): array
     {
         $docker = new ScriptedDockerApi();
-        $clock = new FakeClock();
         $slots = Slots::of(2, new InMemoryStore());
+
+        $clock = new SleepingClock();
 
         $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
         $janitor = new Janitor($docker, new LedgerWriter($runner, new NullLogger(), $clock), new NullLogger(), $clock);
         $command = new JanitorCommand($janitor, new NullLogger(), $clock);
 
-        return [$docker, new CommandTester($command)];
+        if ($stopAfterFirstSleep) {
+            $clock->onSleep = static function () use ($command): void {
+                $command->handleSignal(\SIGTERM);
+            };
+        }
+
+        return [$docker, new CommandTester($command), $command];
     }
 
     /**

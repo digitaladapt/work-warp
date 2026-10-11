@@ -198,6 +198,52 @@ final class JanitorTest extends TestCase
         );
     }
 
+    public function test_a_busy_slot_pool_does_not_stop_the_ledger_line_from_being_attempted(): void
+    {
+        // The ledger write goes through ExecRunner, which reserves a slot.
+        // When every slot is taken by real work the write is skipped — and
+        // the container is still reaped, because a container that outlived
+        // its consumer must go whether or not there is room to narrate it.
+        $docker = new ScriptedDockerApi();
+        $clock = new FakeClock();
+        $slots = Slots::of(1, new InMemoryStore());
+
+        $held = $slots->reserve();
+
+        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
+        $janitor = new Janitor($docker, new LedgerWriter($runner, new NullLogger(), $clock), new NullLogger(), $clock);
+
+        $docker->createVolume('ww-ws-demo', ['ww.session' => 'demo']);
+        $docker->resetCalls();
+        $docker->seedContainer('id-stopped', 'ww-demo-abc123', false, self::NOW - 400, $this->labels(ttl: '300'));
+
+        try {
+            $report = $janitor->sweep();
+        } finally {
+            $held->release();
+        }
+
+        self::assertCount(1, $report->reaped, 'the reap happened even though the ledger could not be written');
+        self::assertContains('removeContainer', $docker->calledMethods());
+        self::assertNotContains('createContainer', $docker->calledMethods(), 'no ledger container: the pool had no slot to give');
+    }
+
+    public function test_a_ledger_attempt_that_fails_still_leaves_the_reap_reported(): void
+    {
+        // The write is best-effort in the strong sense: a Docker failure while
+        // writing the line must not turn a stopped container into an error.
+        [$docker, $janitor] = $this->mount();
+        $docker->createVolume('ww-ws-demo', ['ww.session' => 'demo']);
+        $docker->resetCalls();
+        $docker->seedContainer('id-stopped', 'ww-demo-abc123', false, self::NOW - 400, $this->labels(ttl: '300'));
+        $docker->failNext('createContainer', DockerRefused::because('no space left on device'));
+
+        $report = $janitor->sweep();
+
+        self::assertCount(1, $report->reaped, 'the sweep reports the reap; the failed narration is a log line');
+        self::assertSame([], $report->failed, 'the sweep itself did not fail');
+    }
+
     public function test_an_unknown_session_label_is_reported_and_skips_only_the_ledger_line(): void
     {
         [$docker, $janitor] = $this->mount();
