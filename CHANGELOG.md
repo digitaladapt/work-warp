@@ -248,6 +248,26 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The command image's default `HOME` now points somewhere writable.** The
+  smoke test caught it: "the image must not set HOME" was only half a rule,
+  because the runtime sets one anyway. runc derives `HOME` from the
+  container's passwd entry whenever the environment carries none (v1.1–v1.2 in
+  `libcontainer/init_linux.go`; v1.3+ in `libcontainer/env.go`; `/` when the
+  lookup fails), and the entry named `/home/user` — a read-only path under the
+  production shape. Every `$HOME` write therefore died on the read-only
+  rootfs: `git config --global`, ssh's `known_hosts`, pip's cache. The passwd
+  entry now names `/workspace`, the one directory a command can write and the
+  one whose contents persist in the volume. The image still sets no `HOME` of
+  its own — the broker passes the environment per request — and a
+  caller-supplied `HOME` still wins over the derived default.
+
+  `ww-base/smoke.sh` now checks the real contract instead of the unachievable
+  one: the image config carries no `HOME`, the runtime-derived one is
+  `/workspace` (asserted in both run shapes and by writing to it under
+  `--read-only`), and a caller-supplied `HOME` survives. The Dockerfile's third
+  load-bearing property and the README's "a session should know" section are
+  rewritten to match.
+
 - `Slots` exceeded its own capacity on the first run. A `Lock` is re-entrant
   with respect to itself — a second `acquire()` on the same object succeeds — so
   handing out one cached `Lock` per slot issued three reservations from a pool

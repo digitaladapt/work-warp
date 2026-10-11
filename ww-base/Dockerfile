@@ -14,7 +14,7 @@
 # wheels, prebuilt binaries, git's helpers) assumes glibc far more often than
 # it assumes musl.
 #
-# Two things in here are load-bearing rather than convenient.
+# Three things in here are load-bearing rather than convenient.
 #
 # 1. **/workspace ships owned by uid 1000:gid 1000.** Commands run as
 #    1000:1000 and the root filesystem is read-only, so nothing inside a
@@ -33,6 +33,18 @@
 #    nobody asked for. The empty-array forms below clear both defaults, so a
 #    bare `docker create` is refused ("no command specified") rather than
 #    quietly doing something.
+#
+# 3. **The passwd entry's home names /workspace.** The image sets no HOME — the
+#    environment a command gets is the broker's, not the image's — but the
+#    runtime will not leave it absent: runc derives HOME from the container's
+#    passwd entry whenever the environment carries none (v1.1–v1.2 in
+#    libcontainer/init_linux.go; v1.3+ in libcontainer/env.go, prepareEnv;
+#    "/" when the lookup fails). So the choice left to this file is the
+#    *value*, and it is load-bearing twice over: "/home/user" is a read-only
+#    path under the production shape, so every $HOME write (git config
+#    --global, ssh known_hosts, pip's cache) would die on it — while
+#    "/workspace" is the one directory a command may write, and the one whose
+#    contents persist.
 #
 # Deliberately absent: sudo (capabilities are dropped to ALL and
 # no-new-privileges is set before anything runs — a setuid helper would gain
@@ -129,18 +141,25 @@ RUN apt-get update \
 # volume; numeric on purpose, because a name would depend on this image having
 # a user with that name while the volume is owned by a number.
 #
-# `install -d` rather than mkdir+chown: one command that creates each directory
+# `--home-dir /workspace` is load-bearing, not cosmetic (item 3): the runtime
+# derives HOME from this entry when the environment carries none, so it must
+# name the one directory a command can write.
+#
+# `install -d` rather than mkdir+chown: one command that creates the directory
 # already owned, so there is no window in which it exists as root.
 RUN groupadd --gid 1000 user \
     && useradd --uid 1000 --gid 1000 --no-log-init \
-        --home-dir /home/user --shell /bin/bash user \
-    && install -d -o 1000 -g 1000 -m 0755 /home/user \
+        --home-dir /workspace --shell /bin/bash user \
     && install -d -o 1000 -g 1000 -m 0755 /workspace
 
-# HOME is deliberately NOT set: the broker passes a small, fixed environment
-# and enlarging it is a broker decision, not an image one. /home/user exists
-# for the tools that find it through the passwd entry; a session that wants a
-# writable HOME exports one it chooses (see ww-base/README.md).
+# HOME is not set here, deliberately: the broker passes the environment
+# (per request), and enlarging it is a broker decision, not an image one. What
+# the runtime adds on its own is derived from the passwd entry above — which
+# is why that entry names /workspace (item 3): a command's `git config
+# --global` or ssh `known_hosts` write lands somewhere writable without a
+# session exporting anything, and persists in the volume. A caller that wants
+# a different HOME passes one in the request's env; the runtime keeps a value
+# that is already set, so the caller wins (see ww-base/README.md).
 
 # The safe default for hand runs; the broker passes User explicitly on every
 # create, so this changes nothing in production — it just means the naive

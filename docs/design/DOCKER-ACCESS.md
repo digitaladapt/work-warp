@@ -763,6 +763,17 @@ the scripted seam. Its two load-bearing properties — `/workspace` owned by
 `ww-base/README.md`; the writability check needs a daemon and lives in
 `ww-base/smoke.sh`.
 
+**Corrected 2026-10-11, with the third property.** The smoke test found that
+"the image must not set HOME" is only half a rule: the runtime sets one anyway.
+runc derives `HOME` from the container's passwd entry whenever the environment
+carries none (v1.1–v1.2 in `libcontainer/init_linux.go`; v1.3+ in
+`libcontainer/env.go`; `/` when the lookup fails), so with `--home-dir
+/home/user` every `$HOME` write — `git config --global`, ssh's `known_hosts` —
+landed on the read-only rootfs and died. The entry now names `/workspace`: the
+runtime-derived default is the one directory a command can write, and the one
+whose contents persist. The image still sets no `HOME` of its own, and a
+caller-supplied `HOME` in the request's env still wins.
+
 **Step 3 — the janitor and `reap`.** TTL labels are already written; this is the
 thing that reads them. This is where "cannot sit there forever" becomes true even
 when the broker is dead.
