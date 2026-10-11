@@ -57,9 +57,16 @@ interface DockerApi
     public function killContainer(string $id): void;
 
     /**
-     * `DELETE /containers/{id}?force=1`. Tolerates `404`: "gone" was the goal.
+     * `DELETE /containers/{id}?force=1`, optionally with `v=1` to remove the
+     * container's anonymous volumes along with it.
+     *
+     * `force` stays because killing on the way out is right for the broker's
+     * own containers. `v` is what the janitor adds: it is the last hand on a
+     * container that outlived its consumer, and PLAN.md §8 is explicit that
+     * anonymous volumes and dangling images — not running containers — are
+     * what fills a disk. Tolerates `404`: "gone" was the goal.
      */
-    public function removeContainer(string $id): void;
+    public function removeContainer(string $id, bool $removeAnonymousVolumes = false): void;
 
     /**
      * `GET /containers/{id}/logs`, demultiplexed into stdout and stderr and
@@ -70,6 +77,32 @@ interface DockerApi
      * memory leak with extra steps.
      */
     public function containerLogs(string $id, int $maxBytes): LogOutput;
+
+    /**
+     * `GET /containers/json?all=1`, filtered to the broker's own containers and
+     * reduced to what a sweep acts on.
+     *
+     * The filter is built here from `Labels` and never passed in: the one
+     * cleanup path this broker has must not be able to aim itself at a
+     * neighbour's container, and a caller that could choose the filter could
+     * do exactly that (SECURITY.md; `ww-run reap`'s ownership rule, which this
+     * method is the server-side form of).
+     *
+     * @return list<ContainerSummary>
+     */
+    public function listContainers(): array;
+
+    /**
+     * `POST /containers/{id}/stop`.
+     *
+     * No `t` is passed, deliberately: honouring the stop-timeout means the
+     * container's own `StopTimeout` (baked in at create by `ContainerSpec`),
+     * and the daemon already implements the sequence PLAN.md §8 asks for —
+     * SIGTERM, wait, then SIGKILL. Tolerates `304` (already stopped) and `404`
+     * (already gone): both are the desired end state, and a sweep that raced
+     * another cleaner must not read that as a failure.
+     */
+    public function stopContainer(string $id): void;
 
     /**
      * `GET /networks/{id}` as a question, like `volumeExists`: asked before

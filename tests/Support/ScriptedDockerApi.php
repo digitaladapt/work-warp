@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Support;
 
 use App\Docker\ContainerStatus;
+use App\Docker\ContainerSummary;
 use App\Docker\DockerApi;
 use App\Docker\DockerException;
 use App\Docker\DockerRefused;
@@ -41,6 +42,15 @@ final class ScriptedDockerApi implements DockerApi
     private int $containersCreated = 0;
 
     /**
+     * Containers that exist without having been created through this script —
+     * the janitor's subjects. They carry the summary fields the daemon would
+     * report, because that is exactly what the sweep reads.
+     *
+     * @var list<ContainerSummary>
+     */
+    private array $listed = [];
+
+    /**
      * How the next started container behaves: `finish` ends by itself on the
      * first inspection with the given exit code; `linger` runs until killed.
      *
@@ -51,6 +61,30 @@ final class ScriptedDockerApi implements DockerApi
      * @var array{behaviour: string, exitCode: int}
      */
     private array $runScript = ['behaviour' => 'finish', 'exitCode' => 0];
+
+    /**
+     * A container the janitor should see, as `GET /containers/json` would
+     * describe it. Seeded directly rather than created through the command
+     * lifecycle, because the sweep's subjects are containers the broker did
+     * *not* just create — that is the entire point of a janitor.
+     *
+     * @param array<string, string> $labels
+     */
+    public function seedContainer(
+        string $id,
+        string $name,
+        bool $running,
+        int $createdAt,
+        array $labels,
+    ): void {
+        $this->listed[] = ContainerSummary::fromApiSummary([
+            'Id' => $id,
+            'Names' => ['/'.$name],
+            'State' => $running ? 'running' : 'exited',
+            'Created' => $createdAt,
+            'Labels' => $labels,
+        ]);
+    }
 
     /**
      * The next created container finishes by itself with this exit code, on
@@ -201,12 +235,43 @@ final class ScriptedDockerApi implements DockerApi
     }
 
     #[Override]
-    public function removeContainer(string $id): void
+    public function removeContainer(string $id, bool $removeAnonymousVolumes = false): void
     {
-        $this->record('removeContainer', ['id' => $id]);
+        $this->record('removeContainer', ['id' => $id, 'v' => $removeAnonymousVolumes]);
         $this->maybeFail('removeContainer');
 
         unset($this->containers[$id]);
+    }
+
+    #[Override]
+    public function listContainers(): array
+    {
+        $this->record('listContainers', []);
+        $this->maybeFail('listContainers');
+
+        return $this->listed;
+    }
+
+    #[Override]
+    public function stopContainer(string $id): void
+    {
+        $this->record('stopContainer', ['id' => $id]);
+        $this->maybeFail('stopContainer');
+
+        // The desired end state, reached: the container is no longer running.
+        // A stop on an unknown or already-stopped container is tolerated by
+        // the interface, so the script tolerates it too.
+        foreach ($this->listed as $index => $container) {
+            if ($container->id === $id) {
+                $this->listed[$index] = ContainerSummary::fromApiSummary([
+                    'Id' => $container->id,
+                    'Names' => ['/'.$container->name],
+                    'State' => 'exited',
+                    'Created' => $container->createdAt,
+                    'Labels' => $container->labels,
+                ]);
+            }
+        }
     }
 
     #[Override]

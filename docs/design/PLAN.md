@@ -326,7 +326,9 @@ defeated by the privilege granted to get there.
 
 Two mechanisms, doing different jobs:
 
-- **Labels are authoritative.** `ww.session`, `ww.task`, `ww.ttl`, `ww.kind`.
+- **Labels are authoritative.** `ww.created-by`, `ww.session`, `ww.ttl`, `ww.kind`.
+  (`ww.task` was proposed here and never landed; the four above are what every
+  resource carries — `ww.kind` being `cmd`, `workspace` or `network`.)
   The janitor queries these. Ownership must never be inferred from a name
   string.
 - **The `ww-` prefix is for humans.** Six characters that survive `docker ps`
@@ -529,3 +531,5 @@ the task-loom e2e in §9 becomes a normal operation rather than a manual one.
 | 2026-10-08 | `deploy/compose.yaml` is reconciled with the running stack: the preserved host-side rollout diff is applied (terminal off the proxy network with `DOCKER_HOST` removed, networks `backend`/`api`, proxy pinned to `v0.5.0`). The host is the fact; the file now agrees with it. |
 | 2026-10-10 | The command image is `ww-base/` in this repo, published by the same bake run as the broker as `:<TAG>-base` — one repository, two roles, the task-weaver convention. |
 | 2026-10-10 | The command image ships `/workspace` owned by `1000:1000`. A fresh volume becomes writable only because the daemon's volume-population step copies that ownership from the image into the empty volume (containerd `fs.copyFileInfo`); commands run as uid 1000 against a read-only rootfs, so nothing else can chown it. |
+| 2026-10-11 | The janitor is a child of the broker process (`ww:janitor --every`), not a cron entry and not a second service — §6a's answer, kept. `POST /v1/reap` is the same sweep on demand. |
+| 2026-10-11 | The janitor takes **one action per container per sweep**: running past `ww.ttl` is stopped, not-running past it is removed (`-v`). The next sweep removes what the previous one stopped. The runner cannot lose a race to it: a live runner holds a container for `timeout + 10s`, while `ww.ttl` is `timeout + ttlGrace` — anything past its TTL has no live consumer by construction. |

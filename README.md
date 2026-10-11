@@ -97,6 +97,12 @@ What exists today:
 - The `/v1` **bearer gate**, checked before routing: everything under `/v1`
   needs `WW_TOKEN`, and an unset token refuses rather than allowing.
 - `src/Health/` — liveness and readiness.
+- **The janitor** (`src/Janitor/`) — the sweep that makes "cannot sit there
+  forever" true even when the broker is dead: containers running or sitting
+  past their `ww.ttl` are stopped, and ones already down past it are removed
+  with their anonymous volumes. `POST /v1/reap` sweeps on demand and reports;
+  `php bin/console ww:janitor --every 60` sweeps on a loop as the broker's own
+  child process; kills are written into the session's ledger.
 - The FrankenPHP image, Caddy config, php.ini and entrypoint.
 - **The command image** (`ww-base/`) — what a command container is made of:
   Debian trixie-slim and a general toolset, uid 1000 owning `/workspace`, no
@@ -105,11 +111,11 @@ What exists today:
 - The full quality gate: php-cs-fixer, PHPStan (level 6, empty baseline),
   PHPUnit, `composer audit`.
 
-What does not exist yet: the rest of the HTTP API (`build`, `ps`, `reap`, and
-`GET`/`DELETE` for sessions), the janitor, `stdin` delivery for `exec` (needs
-connection hijacking — currently a `501`), and the MCP surface. See
-DOCKER-ACCESS.md §10 for the build order; `ww-base/README.md` records the
-command image's contract and how to check it.
+What does not exist yet: the rest of the HTTP API (`build`, `ps`, and
+`GET`/`DELETE` for sessions), `stdin` delivery for `exec` (needs connection
+hijacking — currently a `501`), and the MCP surface. See DOCKER-ACCESS.md §10
+for the build order; `ww-base/README.md` records the command image's contract
+and how to check it.
 
 ## Development
 

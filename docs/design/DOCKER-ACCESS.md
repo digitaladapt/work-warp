@@ -767,6 +767,19 @@ the scripted seam. Its two load-bearing properties — `/workspace` owned by
 thing that reads them. This is where "cannot sit there forever" becomes true even
 when the broker is dead.
 
+**Landed.** Two shapes, one engine, in `src/Janitor/`: `POST /v1/reap` sweeps
+on demand and returns the report, and `ww:janitor --every N` runs as the
+broker's own child (`docker/entrypoint.sh`) — §6a's "no cron and no second
+service", where the process is already long-lived. One clock per container,
+read from its own `ww.ttl`: running past it is `POST /stop` (the daemon's
+SIGTERM -> StopTimeout -> SIGKILL, verified in its source), already down past
+it is `DELETE ?force=1&v=1`. §8's race is closed by arithmetic, not by asking
+the runner: a live runner holds a container for its timeout plus ten seconds,
+while `ww.ttl` is that timeout plus `ttlGrace` (300s default) — a container
+past its TTL therefore has no live consumer by construction. Kills are written
+to the session's ledger through the same disposable-container path a command
+uses.
+
 **Step 4 — `build` (scratch), then the compose harness.** A real
 `docker compose up` test against a real stack. `PLAN.md` §9's task-loom e2e
 becomes a normal operation.

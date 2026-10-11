@@ -118,16 +118,74 @@ final class HttpDockerApi implements DockerApi
     }
 
     #[Override]
-    public function removeContainer(string $id): void
+    public function removeContainer(string $id, bool $removeAnonymousVolumes = false): void
     {
+        $query = ['force' => '1'];
+
+        if ($removeAnonymousVolumes) {
+            $query['v'] = '1';
+        }
+
         $response = $this->call('DELETE', '/containers/'.$this->segment($id), [
-            'query' => ['force' => '1'],
+            'query' => $query,
         ]);
 
         $status = $this->status($response);
 
         if (204 !== $status && 404 !== $status) {
             throw $this->refused('remove the container', $response);
+        }
+    }
+
+    #[Override]
+    public function listContainers(): array
+    {
+        // `all=1` so exited containers are visible: they are the ones that
+        // leak volumes and disk, and PLAN.md §8's second rule is entirely
+        // about them. The filter is this broker's own label, built here.
+        $response = $this->call('GET', '/containers/json', [
+            'query' => [
+                'all' => '1',
+                'filters' => json_encode(
+                    ['label' => [Labels::LABEL_CREATED_BY.'='.Labels::CREATED_BY]],
+                    \JSON_THROW_ON_ERROR,
+                ),
+            ],
+        ]);
+
+        if (200 !== $this->status($response)) {
+            throw $this->refused('list the containers', $response);
+        }
+
+        $listed = $this->decoded($response);
+        $containers = [];
+
+        foreach ($listed as $entry) {
+            if (!\is_array($entry)) {
+                throw DockerRefused::because('the daemon listed a container that is not an object');
+            }
+
+            $containers[] = ContainerSummary::fromApiSummary($entry);
+        }
+
+        return $containers;
+    }
+
+    #[Override]
+    public function stopContainer(string $id): void
+    {
+        // No `t`: the container's own StopTimeout — set at create by
+        // ContainerSpec — is the sequence's budget, and the daemon's stop is
+        // already SIGTERM, wait, SIGKILL (verified against moby's stop.go).
+        $response = $this->call('POST', '/containers/'.$this->segment($id).'/stop');
+
+        $status = $this->status($response);
+
+        // 304 is "already stopped" and 404 is "already gone": both are the
+        // desired end state of a stop, and a sweep racing another cleaner must
+        // not read either as a failure.
+        if (204 !== $status && 304 !== $status && 404 !== $status) {
+            throw $this->refused('stop the container', $response);
         }
     }
 

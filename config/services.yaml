@@ -52,6 +52,7 @@ services:
             - '../src/Exec/'
             - '../src/Session/'
             - '../src/Docker/'
+            - '../src/Janitor/'
 
     # Controllers are registered explicitly with the tag that lets their action
     # arguments be resolved from the request.
@@ -106,6 +107,33 @@ services:
 
     App\Docker\DockerApi:
         alias: App\Docker\HttpDockerApi
+
+    # ── The janitor (step 3) ─────────────────────────────────────────────────
+    # The sweep's pieces, registered explicitly like every domain namespace:
+    # src/Janitor/ is excluded above because it holds the report value objects,
+    # which are typed results and not services.
+    #
+    # LedgerWriter goes through ExecRunner on purpose — the ledger line is
+    # written by a disposable container with the workspace mounted, using the
+    # same constraints and the same image as any command. There is no second
+    # write path, and no privileged exception for "just the janitor".
+    App\Janitor\LedgerWriter:
+        arguments:
+            $runner: '@App\Exec\ExecRunner'
+
+    # The sweep itself: what step 3 is. Its DockerApi, LedgerWriter, logger and
+    # clock are autowired; there are no scalars to name.
+    App\Janitor\Janitor: ~
+
+    # The on-demand shape (POST /v1/reap). A controller like any other.
+    App\Janitor\ReapController:
+        tags: ['controller.service_arguments']
+
+    # The loop shape — the same sweep the entrypoint starts as a child of the
+    # broker process (no cron, no second service; DOCKER-ACCESS.md §6a). Tagged
+    # explicitly so it is registered under either autoconfiguration regime.
+    App\Janitor\JanitorCommand:
+        tags: ['console.command']
 
     # The bearer gate for /v1. It runs before routing, so an unauthenticated
     # caller gets the same answer for every /v1 path and cannot use the status

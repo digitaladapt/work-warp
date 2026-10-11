@@ -14,4 +14,22 @@ if [ "$APP_ENV" = "prod" ]; then
     php bin/console cache:warmup --env=prod
 fi
 
+# The sweep, as a child of this process — "no cron and no second service"
+# (DOCKER-ACCESS.md §6a). It starts whenever a Docker host is configured (the
+# first sweep will say plainly if that host is not answering); without one
+# configured, every interval would be a logged warning about a host that does
+# not exist. `set +e` inside the subshell and the 5-second pause make it
+# restart itself if it ever dies, so a crash cannot leave the host unswept; a
+# normal exit happens only on a stop signal, when the container is going away
+# anyway. The interval is a knob, not policy: WW_JANITOR_INTERVAL, default 60.
+if [ -n "${WW_DOCKER_HOST:-}" ]; then
+    (
+        set +e
+        while true; do
+            php bin/console ww:janitor --every "${WW_JANITOR_INTERVAL:-60}"
+            sleep 5
+        done
+    ) &
+fi
+
 exec "$@"

@@ -8,6 +8,53 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The janitor and `reap` — step 3 (DOCKER-ACCESS.md §10).** This is where
+  "cannot sit there forever" becomes true even when the broker is dead. Two
+  shapes, one engine: `POST /v1/reap` sweeps on demand and returns the report
+  (`{inspected, reaped, failed}`), and `ww:janitor --every N` loops — the
+  broker's own child process, started by the image entrypoint, so there is no
+  cron and no second service to deploy (§6a).
+
+  The sweep is one clock per container, read from the container's own
+  `ww.ttl`: a container **running past its TTL is stopped** via
+  `POST /containers/{id}/stop` — the daemon's own SIGTERM, wait for the
+  container's `StopTimeout`, then SIGKILL, checked against moby's `stop.go`
+  rather than assumed — and one **already down past its TTL is removed** via
+  `DELETE ?force=1&v=1`, because §8 is explicit that anonymous volumes and
+  dangling state, not running containers, are what fills a disk. One action
+  per container per sweep: the next sweep removes what the previous one
+  stopped, so every report line says exactly what happened.
+
+  The race §8 worries about is closed by arithmetic, not by asking the
+  runner. A live `ExecRunner` holds a container for at most its timeout plus
+  the ten-second kill grace; `ww.ttl` is that same timeout plus `ttlGrace`
+  (300 s by default). A container past its TTL therefore has no live consumer
+  by construction. A container with no *readable* TTL is left alone rather
+  than guessed at, and the pattern that reads the label is anchored with
+  `\z`, not `$` — `"300\n"` is not a TTL.
+
+  Kills are written into the session's ledger (§8 -> §6.2), through the
+  *existing* disposable-container path — a tiny `ExecRunner` command with the
+  workspace mounted, same image and same constraints as any other command.
+  There is no second write path and no privileged exception for "just the
+  janitor"; the write is best-effort, because a ledger line that cannot be
+  written must never leave a container running.
+
+  The three Docker calls the sweep makes — the label-filtered list, `stop`,
+  `remove` — are all within what the socket proxy admits: `CONTAINERS: 1`
+  covers the list, and `POST /containers/{id}/stop` and `DELETE` are
+  forwarded, because v0.5.0 does not gate on method. That was measured in
+  `deploy/README.md` while the pin was chosen; this feature is the first that
+  depends on it.
+
+- **`DockerApi::listContainers()` and `stopContainer()`, and
+  `removeContainer`'s `v` parameter.** The list is filtered to the broker's
+  own labels *inside the client* — the filter is built from `Labels` and
+  never passed in, so the one cleanup path this broker has cannot be aimed at
+  a neighbour's container. The list call is also the first Docker read that
+  reduces the daemon's payload into a value object (`ContainerSummary`) with
+  the same discipline as `ContainerStatus`.
+
 - **The command image, `ww-base/` — the half of step 2 that was missing.**
   The design's "nothing runs end to end until it exists" image: Debian
   trixie-slim plus a general toolset (git and openssh-client, the archive
@@ -166,6 +213,11 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   now `digitaladapt/work-warp:latest-base` in `.env.example`,
   `config/services.yaml` and `bin/ww-run`, and the tests that pin an image
   name were swept to match.
+
+- **`bin/ww-run` stamps `ww.kind=cmd`, not `ww.kind=command`.** The broker's
+  `Labels::KIND_CMD` is `cmd` and the broker owns the vocabulary — the two
+  ends of one protocol must not disagree about it. No live container today
+  carries the old value; existing labelled resources are unaffected.
 
 - **`Limits` carries the output cap** (`outputByteCap`, 1 MiB per stream). It
   is policy, like every other field there, and the reader stops at it rather
