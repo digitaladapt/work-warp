@@ -173,6 +173,103 @@ final class HttpDockerApiTest extends TestCase
         self::assertSame('http://lyra-dockerproxy:2375/containers/abc123?force=1', $this->requests[0]['url']);
     }
 
+    public function test_removing_with_anonymous_volumes_adds_v_to_the_query(): void
+    {
+        $api = $this->api($this->client(static fn (): MockResponse => new MockResponse('', ['http_code' => 204])));
+
+        $api->removeContainer('abc123', removeAnonymousVolumes: true);
+
+        self::assertSame(
+            'http://lyra-dockerproxy:2375/containers/abc123?force=1&v=1',
+            $this->requests[0]['url'],
+            'the janitor is the one caller that passes v=1: anonymous volumes are what fill a disk (PLAN.md §8)',
+        );
+    }
+
+    public function test_listing_asks_for_all_containers_filtered_by_the_brokers_own_label(): void
+    {
+        $api = $this->api($this->client(static fn (): MockResponse => new MockResponse(
+            '[{"Id":"abc123","Names":["/ww-demo-abc123"],"State":"running","Created":1767225300,"Labels":{"ww.created-by":"work-warp","ww.session":"demo","ww.ttl":"300"}}]',
+            ['http_code' => 200],
+        )));
+
+        $listed = $api->listContainers();
+
+        self::assertSame('GET', $this->requests[0]['method']);
+        self::assertStringStartsWith('http://lyra-dockerproxy:2375/containers/json?', $this->requests[0]['url']);
+        self::assertStringContainsString('all=1', $this->requests[0]['url'], 'exited containers are the sweep\'s main subject');
+
+        // Assert on the query as the daemon will parse it, not on how the
+        // HTTP client happened to encode it: Symfony encodes `{`, `"` and `=`
+        // but leaves `:` and brackets, and pinning that spelling would be a
+        // test of the client rather than of the filter.
+        $query = [];
+        parse_str((string) parse_url($this->requests[0]['url'], \PHP_URL_QUERY), $query);
+
+        self::assertSame('1', $query['all'] ?? null);
+        self::assertSame(
+            '{"label":["ww.created-by=work-warp"]}',
+            $query['filters'] ?? null,
+            'the filter is built here and never passed in: cleanup must not be aimable at a neighbour',
+        );
+
+        self::assertCount(1, $listed);
+        self::assertSame('abc123', $listed[0]->id);
+        self::assertSame('ww-demo-abc123', $listed[0]->name, 'the slash Docker prefixes is not part of the name');
+        self::assertTrue($listed[0]->running);
+        self::assertSame(1767225300, $listed[0]->createdAt);
+        self::assertSame('300', $listed[0]->labels['ww.ttl']);
+    }
+
+    public function test_a_listed_container_without_a_name_or_state_is_a_refusal(): void
+    {
+        $api = $this->api($this->client(static fn (): MockResponse => new MockResponse(
+            '[{"Id":"abc123","Names":[],"State":"running","Created":1,"Labels":null}]',
+            ['http_code' => 200],
+        )));
+
+        $this->expectException(DockerRefused::class);
+        $this->expectExceptionMessage('without a name');
+
+        $api->listContainers();
+    }
+
+    public function test_stopping_tolerates_already_stopped_and_already_gone(): void
+    {
+        foreach ([204, 304, 404] as $code) {
+            $api = $this->api($this->client(static fn (): MockResponse => new MockResponse('', ['http_code' => $code])));
+
+            $api->stopContainer('abc123');
+        }
+
+        self::assertCount(3, $this->requests, '204, 304 and 404 are all the desired end state of a stop');
+
+        foreach ($this->requests as $request) {
+            self::assertSame('POST', $request['method']);
+            self::assertSame(
+                'http://lyra-dockerproxy:2375/containers/abc123/stop',
+                $request['url'],
+                'no t= is passed: the container\'s own StopTimeout is the sequence\'s budget',
+            );
+        }
+    }
+
+    public function test_a_refused_stop_keeps_the_daemons_words(): void
+    {
+        $api = $this->api($this->client(static fn (): MockResponse => new MockResponse(
+            '{"message":"cannot stop container: driver error"}',
+            ['http_code' => 500],
+        )));
+
+        try {
+            $api->stopContainer('abc123');
+            self::fail('a refused stop must not pass silently');
+        } catch (DockerRefused $e) {
+            self::assertStringContainsString('stop the container (500)', $e->getMessage());
+            self::assertStringContainsString('driver error', $e->getMessage());
+        }
+    }
+
     public function test_logs_come_back_demultiplexed(): void
     {
         $body = self::frame(1, "hello\n").self::frame(2, "warn\n").self::frame(1, "again\n");

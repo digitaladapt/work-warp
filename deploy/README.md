@@ -200,9 +200,14 @@ matters as a footnote rather than as a false clean bill of health.
    Accepting means 134 sensitive-looking values are readable through the proxy by
    anything holding the token. Splitting means not using this proxy for that
    endpoint.
-2. **`DELETE` — widen the policy or narrow the token** *(still open)*. Nothing
-   can clean up today (no `DELETE` in the proxy's variable list, and the flag is
-   the only thing that gates method). The janitor is the feature that needs it.
+2. **`DELETE` — widen the policy or narrow the token** *(still open, and now
+   load-bearing)*. Nothing can clean up today (no `DELETE` in the proxy's
+   variable list, and the flag is the only thing that gates method) — which is
+   exactly why the janitor works: its sweep's `DELETE ?force=1&v=1` and
+   `POST /containers/{id}/stop` are forwarded *by the hole*, not by policy.
+   The decision to make this deliberate rather than incidental is still open;
+   the janitor (landed 2026-10-11) is the feature that now depends on the
+   answer.
 3. **Pin the image** — **done**, landed as `v0.5.0` (tag) rather than `:latest`:
    the tag is the version every measurement here was taken against, and a stale
    `:latest` re-pull could have swapped the policy out from under them.
@@ -263,8 +268,9 @@ steps 5–7 the terminal flip, and the verification that followed is in §10d of
 
    Result when run: 1 finding — `DELETE` is forwarded on
    `/volumes`, `/containers` and `/networks`, because this proxy version does not
-   gate on method. That finding stands, and the janitor is the feature that will
-   need it.
+   gate on method. That finding stands, and the janitor — which landed
+   2026-10-11 — is the feature it matters for: its sweep depends on
+   `POST /containers/{id}/stop` and `DELETE ?force=1&v=1` being forwarded.
 
 ### Stage 2 — the terminal flip. This restarted the container I live in.
 

@@ -218,7 +218,9 @@ $USAGE" ;;
     --label "${WW_LABEL_OWNER}"
     --label "ww.session=${WW_SESSION}"
     --label "ww.ttl=${WW_TTL}"
-    --label "ww.kind=command"
+    # `cmd`, matching App\Docker\Labels::KIND_CMD — the broker owns the
+    # vocabulary and this is the same protocol's other end (DOCKER-ACCESS.md §9).
+    --label "ww.kind=cmd"
     --init
     --cap-drop=ALL
     --security-opt=no-new-privileges
