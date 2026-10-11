@@ -6,8 +6,9 @@
 # (CONTRIBUTING.md), and no daemon is anywhere in it. What only a daemon can
 # answer is checked here:
 #
-#   1. the image's shape — uid 1000 by default, no default command, no HOME of
-#      its own;
+#   1. the image's shape — uid 1000 by default, no default command, no HOME in
+#      its config (the runtime derives $HOME from the passwd entry, which must
+#      name /workspace — see below);
 #   2. the toolset is what the Dockerfile promises;
 #   3. **a fresh volume mounted at /workspace is writable by uid 1000.** This
 #      is the load-bearing one. It depends on the image shipping /workspace
@@ -21,6 +22,12 @@
 # The run in (3) uses the production shape — --read-only, dropped caps,
 # --no-new-privileges, --network none, uid 1000 — so an image that secretly
 # needs a writable rootfs fails here rather than in a session.
+#
+# The HOME check is subtler than it looks: an image cannot "leave HOME unset".
+# runc derives one from the container's passwd entry whenever the environment
+# carries none, so what is checked is (a) the image config sets none, and
+# (b) the derived one is /workspace — the only directory a command can write
+# under the production shape.
 #
 # Usage:
 #   bash ww-base/smoke.sh [image]
@@ -95,6 +102,18 @@ else
     fail "default working directory is '$workdir', expected '/workspace'"
 fi
 
+# The config is where "the image must not set HOME" is decided, and the one
+# half of the HOME story this file controls directly: the environment is the
+# broker's to pass per request. What the config carries is checked here; what
+# the runtime derives from the passwd entry is checked behaviourally below.
+config_env="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE")"
+
+if printf '%s\n' "$config_env" | grep -q '^HOME='; then
+    fail "the image config sets HOME; the environment is the broker's to pass, and the image must not set one"
+else
+    pass "the image config carries no HOME — the broker decides the environment; the runtime's derived default comes from the passwd entry"
+fi
+
 # The decisive shape check is behavioural: a bare create must be refused for
 # the right reason. If the image carried any default command, this succeeds and
 # something would run that nobody asked for.
@@ -128,18 +147,31 @@ if docker run --rm "$IMAGE" bash -euc '
     python3 -c "import ssl, sqlite3, ctypes, http.client, json, venv" \
         || { echo "python3 is missing standard-library modules (was it python3-minimal?)"; exit 1; }
 
-    # HOME belongs to the broker to decide, and the broker does not set one;
-    # the image must not set one behind its back.
-    [ -z "${HOME:-}" ] || { echo "HOME is set to \"$HOME\"; the image must not set it"; exit 1; }
+    # The image config sets no HOME (checked above); the runtime derives one
+    # from the passwd entry inside the container when the environment carries
+    # none. The entry must name /workspace — the one directory a command may
+    # write — or every tool that writes to $HOME dies on the read-only rootfs
+    # under the production shape.
+    [ "${HOME:-}" = "/workspace" ] \
+        || { echo "HOME is \"${HOME:-<unset>}\", expected /workspace — runc derives HOME from the passwd entry, and it must name the writable directory"; exit 1; }
 
     [ "$(stat -c "%u:%g" /workspace)" = "1000:1000" ] \
         || { echo "/workspace is $(stat -c "%u:%g" /workspace), expected 1000:1000"; exit 1; }
 
     echo "toolset, environment and ownership ok"
 '; then
-    pass "every expected tool resolves; python3 has its stdlib; HOME is unset; /workspace is 1000:1000"
+    pass "every expected tool resolves; python3 has its stdlib; HOME derives to /workspace; /workspace is 1000:1000"
 else
     fail "the toolset, environment or ownership check failed (output above)"
+fi
+
+# The documented escape hatch: a caller that wants a different HOME passes one
+# in the request's env, and the runtime keeps a value that is already set. If
+# this ever stops holding, the README's advice stops being true.
+if docker run --rm -e HOME=/tmp "$IMAGE" bash -euc '[ "$HOME" = "/tmp" ]'; then
+    pass "a caller-supplied HOME (/tmp) wins over the runtime's derived default"
+else
+    fail "a caller-supplied HOME did not survive; the documented escape hatch is broken"
 fi
 
 # ---------------------------------------------------------------------------
@@ -166,6 +198,12 @@ if docker run --rm \
     touch /workspace/.smoke-write && rm /workspace/.smoke-write
     mkdir -p /workspace/.smoke-dir && rmdir /workspace/.smoke-dir
 
+    # And HOME must point at it: runc derives HOME from the passwd entry, and
+    # the first write to $HOME that matters (git config --global, ssh
+    # known_hosts) has to land somewhere writable.
+    [ "${HOME:-}" = "/workspace" ] || { echo "HOME is \"${HOME:-<unset>}\", expected /workspace"; exit 1; }
+    touch "$HOME/.smoke-home-write" && rm "$HOME/.smoke-home-write"
+
     # /tmp is the one guaranteed scratch space under a read-only rootfs.
     touch /tmp/.smoke-write && rm /tmp/.smoke-write
 
@@ -177,7 +215,7 @@ if docker run --rm \
 
     echo "fresh volume writable by uid 1000 under the production shape"
 '; then
-    pass "fresh volume: /workspace is writable by 1000:1000 with a read-only rootfs and dropped caps"
+    pass "fresh volume: /workspace is writable by 1000:1000 (and HOME derives to it) with a read-only rootfs and dropped caps"
 else
     fail "a fresh volume was not writable at /workspace under the production shape"
     note "check that the image ships /workspace owned by 1000:1000 (see ww-base/Dockerfile) and that the daemon populates volumes"

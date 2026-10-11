@@ -57,6 +57,45 @@ final class CommandImageTest extends TestCase
         self::assertSame('1000:1000', end($users), 'The last USER wins, so the last one must be the non-root one.');
     }
 
+    /**
+     * The third load-bearing property, found by the smoke test on 2026-10-11.
+     *
+     * An image cannot leave HOME unset: runc derives one from the container's
+     * passwd entry whenever the environment carries none, so the entry decides
+     * where `$HOME` writes land. If it names /home/user, every such write dies
+     * on the read-only rootfs; it must name /workspace — the one directory a
+     * command can write, and the one that persists.
+     */
+    public function test_the_passwd_home_names_the_writable_directory(): void
+    {
+        $dockerfile = $this->read('ww-base/Dockerfile');
+
+        self::assertMatchesRegularExpression(
+            '/--home-dir \/workspace/',
+            $dockerfile,
+            'The passwd entry must name /workspace as its home: runc derives HOME from it whenever the environment carries none, and $HOME writes (git config --global, ssh known_hosts) must land somewhere writable.',
+        );
+
+        self::assertDoesNotMatchRegularExpression(
+            '~--home-dir /home/~',
+            $dockerfile,
+            'A passwd home under /home resolves to a read-only path under the production shape; $HOME writes would fail there.',
+        );
+
+        self::assertDoesNotMatchRegularExpression(
+            '/^ENV HOME=/m',
+            $dockerfile,
+            'The image must not set HOME in its config: the environment is the broker\'s to pass per request, and the runtime only supplies a default when the environment carries none.',
+        );
+
+        // The smoke test asserts the other half of this on a daemon; keep the
+        // two files from drifting apart about what is being checked.
+        $smoke = $this->read('ww-base/smoke.sh');
+
+        self::assertStringContainsString('^HOME=', $smoke, 'smoke.sh must assert the image config carries no HOME — the half that is this image\'s to decide.');
+        self::assertStringContainsString('"${HOME:-}" = "/workspace"', $smoke, 'smoke.sh must assert the runtime-derived HOME is /workspace, not only that the config sets none.');
+    }
+
     public function test_the_image_carries_no_default_command(): void
     {
         /** @var array<string, list<string>> $found */
