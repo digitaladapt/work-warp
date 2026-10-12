@@ -94,6 +94,21 @@ What exists today:
   `src/Exec/ExecController.php` + `ExecRunner.php` serve
   `POST /v1/sessions/{name}/exec`: one ephemeral container per command, a slot
   held for the run, a hard deadline, demultiplexed capped output.
+- **The scratch build path** (`src/Build/`) — `POST /v1/sessions/{name}/build`
+  runs a real `docker build` from a tar context the caller streams, tagged
+  `ww-<session>-<tag>:latest` and disposable by construction. The body is the
+  context and the parameters ride in the query (`?tag=&network=&timeout=`), the
+  same shape the daemon itself uses. `network: none | session` is the same
+  enum exec uses; a build that needs egress joins the session network. The
+  budget is the connection's (the daemon cancels a build whose client
+  disconnects), failures keep the daemon's own two shapes (a mid-stream failure
+  is a 200 with the diagnosis; a pre-stream refusal is a 502 with its words),
+  and the outcome is confirmed by asking the daemon whether the image exists
+  rather than parsing the log. **Pins `version=1`, the classic builder, for a
+  measured reason** — BuildKit refuses custom networks, so it cannot express
+  `network: session` (DOCKER-ACCESS.md §10 step 4a). Needs `BUILD: 1` at the
+  socket proxy in deployment; that change is staged in `deploy/compose.yaml`
+  and flagged in `deploy/README.md` as pending host application.**
 - The `/v1` **bearer gate**, checked before routing: everything under `/v1`
   needs `WW_TOKEN`, and an unset token refuses rather than allowing.
 - `src/Health/` — liveness and readiness.
@@ -111,11 +126,11 @@ What exists today:
 - The full quality gate: php-cs-fixer, PHPStan (level 6, empty baseline),
   PHPUnit, `composer audit`.
 
-What does not exist yet: the rest of the HTTP API (`build`, `ps`, and
-`GET`/`DELETE` for sessions), `stdin` delivery for `exec` (needs connection
-hijacking — currently a `501`), and the MCP surface. See DOCKER-ACCESS.md §10
-for the build order; `ww-base/README.md` records the command image's contract
-and how to check it.
+What does not exist yet: `ps` and `GET`/`DELETE` for sessions, `stdin`
+delivery for `exec` (needs connection hijacking — currently a `501`), the
+compose harness, and the MCP surface. See DOCKER-ACCESS.md §10 for the build
+order; `ww-base/README.md` records the command image's contract and how to
+check it.
 
 ## Development
 

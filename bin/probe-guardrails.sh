@@ -89,8 +89,20 @@ done
 
 printf '\nWRITE paths that must be BLOCKED\n'
 # Each of these is a way to escalate past the proxy without needing the socket.
-if raw_api POST /build; then fail "POST /build — REACHED (${LAST_CODE})"; else pass "POST /build blocked (${LAST_CODE})"; fi
+# /exec/{id}/start is the real one: creating an exec instance is inert, and only
+# /start runs anything.
 if raw_api POST /exec; then fail "POST /exec — REACHED (${LAST_CODE})"; else pass "POST /exec blocked (${LAST_CODE})"; fi
+
+# /build is INFORMATION, not a finding, since step 4a. The broker's scratch
+# build path needs it (the same way containers/create is needed), so
+# `BUILD: 1` is the intended end state and this line reports which side of the
+# rollout the deployment is on rather than calling reachability an escalation.
+# Design: DOCKER-ACCESS.md §10 step 4a; deploy/README.md records the change.
+if raw_api POST /build; then
+  info "POST /build reachable (${LAST_CODE}) — BUILD=1 is applied; the broker's build path can work"
+else
+  info "POST /build blocked (${LAST_CODE}) — BUILD=1 not applied yet; the broker's build endpoint will answer 502"
+fi
 # Whether the proxy gates on METHOD at all. If CONTAINERS is enabled and the
 # section ACL does not check the verb, a hostile caller can DELETE a neighbour —
 # the janitor is then not the only thing that can remove a container.

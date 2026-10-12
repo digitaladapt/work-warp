@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace App\Tests\Support;
 
+use App\Build\BuildOutput;
 use App\Docker\ContainerStatus;
 use App\Docker\ContainerSummary;
 use App\Docker\DockerApi;
-use App\Docker\DockerException;
 use App\Docker\DockerRefused;
 use App\Docker\LogOutput;
 use Override;
+use Throwable;
 
 /**
  * The Docker seam, as a script.
@@ -30,7 +31,7 @@ final class ScriptedDockerApi implements DockerApi
     /** @var array<string, array<string, string>> network name → labels */
     private array $networks = [];
 
-    /** @var array<string, DockerException> method name → the failure it throws next */
+    /** @var array<string, Throwable> method name → the failure it throws next */
     private array $failures = [];
 
     /** @var list<array{method: string, args: array<string, mixed>}> */
@@ -61,6 +62,52 @@ final class ScriptedDockerApi implements DockerApi
      * @var array{behaviour: string, exitCode: int}
      */
     private array $runScript = ['behaviour' => 'finish', 'exitCode' => 0];
+
+    /**
+     * How the next build behaves: what its stream carries, and whether the
+     * tag exists afterwards.
+     *
+     * The two are independent on purpose — `output.timedOut` with
+     * `tagged: true` is the race where the build completed exactly as the
+     * clock cut the stream, and it must be scriptable because it is the case
+     * the runner's image lookup exists for.
+     *
+     * @var array{output: ?BuildOutput, tagged: bool}
+     */
+    private array $buildScript = ['output' => null, 'tagged' => false];
+
+    /** @var array<string, bool> image reference → exists */
+    private array $images = [];
+
+    /**
+     * Script the next build: this stream result, and whether the tag exists
+     * afterwards (i.e. whether the build produced an image).
+     */
+    public function scriptNextBuild(BuildOutput $output, bool $tagged): void
+    {
+        $this->buildScript = ['output' => $output, 'tagged' => $tagged];
+    }
+
+    /**
+     * The common case in one call: a build whose stream carries this output,
+     * ending successfully or with a reported failure.
+     */
+    public function runBuildToCompletion(string $output, bool $tagged, bool $failed = false, string $error = ''): void
+    {
+        $this->scriptNextBuild(
+            new BuildOutput($failed ? $output.'error: '.$error."\n" : $output, false, false, $failed),
+            $tagged,
+        );
+    }
+
+    /**
+     * Seed an image that exists without having been built — the fixture for
+     * "the image was already there" cases.
+     */
+    public function seedImage(string $reference): void
+    {
+        $this->images[$reference] = true;
+    }
 
     /**
      * A container the janitor should see, as `GET /containers/json` would
@@ -118,7 +165,7 @@ final class ScriptedDockerApi implements DockerApi
      * The next call to `$method` throws this instead of doing its job. One
      * shot, so a scripted failure cannot leak into the following test.
      */
-    public function failNext(string $method, DockerException $failure): void
+    public function failNext(string $method, Throwable $failure): void
     {
         $this->failures[$method] = $failure;
     }
@@ -333,6 +380,50 @@ final class ScriptedDockerApi implements DockerApi
         return isset($this->volumes[$name]);
     }
 
+    #[Override]
+    public function buildImage(array $query, mixed $context, float $timeoutSeconds, int $maxOutputBytes): BuildOutput
+    {
+        $this->record('buildImage', [
+            'query' => $query,
+            'timeout' => $timeoutSeconds,
+            'maxOutputBytes' => $maxOutputBytes,
+        ]);
+        $this->maybeFail('buildImage');
+
+        $tag = \is_string($query['t'] ?? null) ? $query['t'] : null;
+
+        // Drains the context exactly as the real client does. No cap check
+        // here: the cap belongs to ContextStream, which wraps the caller's
+        // stream *before* it reaches this seam — so a cap trip raises from
+        // there mid-iteration, which is the real path's behaviour and the
+        // real path's exception.
+        $source = \is_resource($context) ? self::chunks($context) : (is_iterable($context) ? $context : []);
+
+        foreach ($source as $_) {
+            // Discarded; the script answers with the scripted stream result.
+        }
+
+        $output = $this->buildScript['output'] ?? new BuildOutput('', false, false, false);
+
+        // Tagging follows the script, not an assumption: `tagged: true` with
+        // `timedOut: true` models the race the runner handles — the build
+        // finished and tagged as the broker's clock cut the stream.
+        if (null !== $tag && $this->buildScript['tagged']) {
+            $this->images[$tag] = true;
+        }
+
+        return $output;
+    }
+
+    #[Override]
+    public function imageExists(string $reference): bool
+    {
+        $this->record('imageExists', ['reference' => $reference]);
+        $this->maybeFail('imageExists');
+
+        return $this->images[$reference] ?? false;
+    }
+
     /**
      * @param array<string, mixed> $args
      */
@@ -358,6 +449,24 @@ final class ScriptedDockerApi implements DockerApi
     {
         if (!isset($this->containers[$id])) {
             throw DockerRefused::because('no such container: '.$id);
+        }
+    }
+
+    /**
+     * @param resource $source
+     *
+     * @return iterable<string>
+     */
+    private static function chunks($source): iterable
+    {
+        while (!feof($source)) {
+            $chunk = fread($source, 65_536);
+
+            if (false === $chunk || '' === $chunk) {
+                break;
+            }
+
+            yield $chunk;
         }
     }
 }

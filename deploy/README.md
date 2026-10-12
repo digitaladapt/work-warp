@@ -140,6 +140,17 @@ checks. Everything below is an observation, not a prediction.
 `/containers/json`, `/images/json`, `/networks`, `/volumes` — is `200`.
 `POST /build` and `POST /exec` are `403`.
 
+**`/build` moves out of that list — step 4a, 2026-10-12.** It was `403` while
+nothing needed it. The broker's scratch build path does need it — exactly as it
+needs `POST /containers/create` — so `deploy/compose.yaml` now carries
+`BUILD: 1` for the proxy, and this paragraph records the change as **pending
+host application**: until the host adds that variable and re-ups
+`lyra-dockerproxy`, `POST /v1/sessions/{name}/build` answers `502` because the
+proxy refuses `POST /build`. The probe reports `/build` as information rather
+than a finding for the same reason — reachable is expected once `BUILD=1` is
+set, blocked means it has not been applied, and neither is an escalation now
+that the build path is a designed capability rather than an escape.
+
 **The good news is bigger than the bad news: there is no root path.** I tested
 whether the read leak below could be turned into execution. It cannot, as
 configured:
@@ -151,8 +162,9 @@ configured:
 
 Creating an exec instance is inert; only `/start` runs anything, and `/start`
 is blocked by the `EXEC` flag. So the exec path is **not** reachable, and the
-`COMPOSE`/`EXEC=0` setting is doing real work. The same is true of `/build`.
-Escalation therefore requires the *create* path, which is still yours to decide.
+`EXEC` setting is doing real work. (`/build`'s status is now the broker's — see
+above.) Escalation therefore requires the *create* path, which is still yours to
+decide.
 
 **Confirmed broken: the proxy does not gate on method.** `DELETE` is forwarded
 on `/volumes/...`, `/containers/...`, and `/networks/...` (each `404` for a

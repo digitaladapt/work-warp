@@ -9,6 +9,7 @@ use App\Docker\DockerUnavailable;
 use App\Session\InvalidSessionName;
 use App\Session\NoSuchSession;
 use App\Session\SessionName;
+use App\Support\Utf8;
 use Symfony\Component\HttpFoundation\Exception\JsonException;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -91,36 +92,11 @@ final class ExecController
 
         return new JsonResponse([
             'exit_code' => $result->exitCode,
-            'stdout' => self::utf8($result->stdout),
-            'stderr' => self::utf8($result->stderr),
+            'stdout' => Utf8::scrub($result->stdout),
+            'stderr' => Utf8::scrub($result->stderr),
             'truncated' => $result->truncated,
             'timed_out' => $result->timedOut,
         ], Response::HTTP_OK, ['Cache-Control' => 'no-store']);
-    }
-
-    /**
-     * Valid UTF-8 passes through untouched; anything else gets U+FFFD in the
-     * position of each invalid byte, via the one PHP tool that does this
-     * without silent loss: `json_encode` with `JSON_INVALID_UTF8_SUBSTITUTE`,
-     * decoded straight back. Checked against the alternative
-     * (`mb_convert_encoding`) while building this, because mbstring replaces
-     * with `?` by default — losing the distinction between "a byte that was
-     * not text" and "a question mark the command actually printed".
-     */
-    private static function utf8(string $text): string
-    {
-        if (1 === preg_match('//u', $text)) {
-            return $text;
-        }
-
-        $scrubbed = json_decode(
-            json_encode($text, \JSON_INVALID_UTF8_SUBSTITUTE | \JSON_THROW_ON_ERROR),
-            true,
-            512,
-            \JSON_THROW_ON_ERROR,
-        );
-
-        return \is_string($scrubbed) ? $scrubbed : '';
     }
 
     private static function error(int $status, string $slug, string $reason): JsonResponse

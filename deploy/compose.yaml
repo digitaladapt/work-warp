@@ -48,6 +48,11 @@ services:
       VOLUMES: 1              # the workspace lives on one
       #   write
       POST: 1                 # the minimum that lets create/start work at all
+      BUILD: 1                # the broker's scratch build path (POST /build).
+                              # Added for step 4a: the broker builds session
+                              # images through this. Until the host applies
+                              # this, POST /build is 403 at the proxy and the
+                              # broker's build endpoint is unreachable.
     networks:
       - backend
     volumes:

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\Docker;
 
+use App\Build\BuildContextTooLarge;
+use App\Build\BuildOutput;
+
 /**
  * The broker's one door to the Docker daemon — an interface so the door can be
  * a fake in the test suite.
@@ -136,4 +139,43 @@ interface DockerApi
      * from a failed container create would misreport it as a daemon problem.
      */
     public function volumeExists(string $name): bool;
+
+    /**
+     * `POST /build`, with the query assembled by `BuildSpec` and the context
+     * streamed as the request body.
+     *
+     * The stream is read as it arrives and only the lines that carry output,
+     * an image tag or an error are kept, bounded by `$maxOutputBytes` for the
+     * same reason the log reader is bounded. A build that runs and fails is a
+     * *result* — the daemon's own diagnosis is in `output` — not an
+     * exception; the exceptions mean the broker could not ask
+     * (DockerUnavailable), the daemon said no (DockerRefused), or the caller's
+     * context ran past its cap (`BuildContextTooLarge`, which passes through
+     * here unchanged so the controller can answer 413 rather than 5xx).
+     *
+     * The budget is the HTTP call's own: `$timeoutSeconds` bounds the request,
+     * and the daemon documents that a build whose client disconnects is
+     * cancelled — which is the only clock that can exist for a build, because
+     * the build's containers belong to the daemon and there is nothing here
+     * to kill.
+     *
+     * @param array<string, string>            $query   assembled by BuildSpec, never by a caller
+     * @param resource|iterable<string>|string $context the build context, already capped by ContextStream
+     *
+     * @throws BuildContextTooLarge when the context stream raises its cap mid-flight
+     */
+    public function buildImage(array $query, mixed $context, float $timeoutSeconds, int $maxOutputBytes): BuildOutput;
+
+    /**
+     * `GET /images/{name}/json` as a question: did the build produce the image
+     * it said it would?
+     *
+     * The runner asks this after a stream that ended without a timeout, and it
+     * is the *authoritative* success signal — the alternative is believing a
+     * text line ("Successfully tagged …") that the broker did not write and
+     * cannot vouch for. The daemon answers 200 for a present image and 404 for
+     * an absent one; anything else is a refusal, and a lookup the daemon
+     * refused must never be read as "no" (the same rule as `volumeExists`).
+     */
+    public function imageExists(string $reference): bool;
 }
