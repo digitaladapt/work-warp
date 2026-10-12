@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Session;
 
+use App\Build\BuildTag;
+
 /**
  * A session name, and the only source of the names derived from it.
  *
@@ -63,5 +65,19 @@ final class SessionName
     public function containerName(string $id): string
     {
         return 'ww-'.$this->value.'-'.$id;
+    }
+
+    /**
+     * The repository a scratch build lands in: `ww-<session>-<tag>`.
+     *
+     * Scoped to one session by construction — the caller supplies only the
+     * tag, and the session prefix is this method's business — so a build can
+     * neither overwrite another session's image nor collide with the shared
+     * base (`digitaladapt/work-warp:*`). Disposable by convention: nothing
+     * pushes it, and a rebuild of the same tag replaces it.
+     */
+    public function buildImageRef(BuildTag $tag): string
+    {
+        return 'ww-'.$this->value.'-'.$tag->value;
     }
 }

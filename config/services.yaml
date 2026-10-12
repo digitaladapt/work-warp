@@ -53,6 +53,7 @@ services:
             - '../src/Session/'
             - '../src/Docker/'
             - '../src/Janitor/'
+            - '../src/Build/'
 
     # Controllers are registered explicitly with the tag that lets their action
     # arguments be resolved from the request.
@@ -94,6 +95,29 @@ services:
     # The exec endpoint. A controller like any other: tagged so its action
     # arguments resolve from the request.
     App\Exec\ExecController:
+        tags: ['controller.service_arguments']
+
+    # The session's network, created lazily. Extracted when build became the
+    # second caller (exec created it before every `network: session` command;
+    # a build with `network: session` needs the same thing). One
+    # implementation, so the two callers cannot drift.
+    App\Session\SessionNetwork:
+        arguments:
+            $docker: '@App\Docker\DockerApi'
+
+    # ── The scratch build (step 4a) ──────────────────────────────────────────
+    # Registered explicitly like every domain namespace: src/Build/ is
+    # excluded above for the typed request objects and the result, which are
+    # values and not services. The runner holds a slot for the whole build
+    # (§6b's unit is the workspace) and its DockerApi, Slots and SessionNetwork
+    # are autowired.
+    App\Build\BuildRunner:
+        arguments:
+            $docker: '@App\Docker\DockerApi'
+            $networks: '@App\Session\SessionNetwork'
+
+    # The build endpoint. A controller like any other.
+    App\Build\BuildController:
         tags: ['controller.service_arguments']
 
     # The Docker client. One definition and one alias, so everything that

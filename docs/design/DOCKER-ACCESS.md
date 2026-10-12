@@ -206,8 +206,8 @@ GET    /v1/sessions/{name}                             → {session, containers,
 DELETE /v1/sessions/{name}          {keep_workspace?}  → destroys containers + volume
 POST   /v1/sessions/{name}/exec     {cmd[], timeout, network, stdin?}
                                                        → {exit_code, stdout, stderr, truncated, ...}
-POST   /v1/sessions/{name}/build    {context: tar, tag, network}
-                                                       → {image}   (scratch, disposable)
+POST   /v1/sessions/{name}/build    ?tag=&network=&timeout=   (the body is the tar)
+                                                       → {image, output, truncated, timed_out}
 GET    /v1/sessions/{name}/ps                          → ww- containers for this session only
 POST   /v1/reap                                        → janitor: stop past-TTL, report
 GET    /healthz
@@ -226,6 +226,18 @@ full field table. Path parameters and `name`/`tag` are bounded:
 | `env` | map<string,string> | the *container's* env, declared explicitly, never inherited |
 | `stdin` | string, capped | optional |
 | `tag` | `[a-z0-9._-]{1,40}` | becomes `ww-<session>-<tag>` |
+
+**`build` correction, added 2026-10-12 when it landed.** The line above said the
+context arrives as a `tar` field in a JSON body; it arrives as the **request
+body itself**, with the parameters in the query (`?tag=intl&network=session`),
+because there is no JSON body to put fields in — the body *is* the context. That
+is also how the daemon takes it (`POST /build?t=…` with a tar body), so the
+broker's edge and its upstream agree about where each thing lives. And `tag`'s
+pattern is stricter than the table: measured against Docker 29.8, the daemon's
+own reference grammar is `[a-z0-9]+(?:[._-][a-z0-9]+)*` — separators must sit
+*between* alphanumerics (`x-`, `x..y` and `.x` are all refused with "invalid
+reference format"). The broker enforces the grammar the daemon actually
+accepts, so a bad tag is the caller's `422` rather than the daemon's `502`.
 
 There is deliberately no `mount`, `privileged`, `cap_add`, `user`, `entrypoint`,
 `hostname`, `label` or `name`-beyond-the-tag. `network: session` is the only thing
@@ -794,6 +806,63 @@ uses.
 **Step 4 — `build` (scratch), then the compose harness.** A real
 `docker compose up` test against a real stack. `PLAN.md` §9's task-loom e2e
 becomes a normal operation.
+
+**Landed, in the scratch-build half — and the measurements reshaped it because
+there are two builders.** The daemon still serves the **classic builder**
+(`POST /build?version=1`, the default) and **BuildKit** (`version=2`); Docker 29.8
+has both, and they are not interchangeable for this design:
+
+| probe (measured 2026-10-12, against Docker 29.8) | classic (`version=1`) | BuildKit (`version=2`) |
+|---|---|---|
+| tar body, `{"stream":…}` progress lines | yes | yes (plus `aux` trace lines) |
+| `networkmode=<custom network>` | **accepted** | **refused**: `network mode "…" not supported by buildkit` |
+| a failed build inside a `200` stream | `{"error":…}` | `{"error":…}` |
+| tag form validation | daemon's reference grammar | same |
+
+**So the build path pins `version=1`, deliberately.** `network: session` is the
+whole point of a non-hermetic build (a `RUN` that needs a registry or a package
+mirror), BuildKit cannot express it, and the classic builder can — and the
+classic builder is *deprecated upstream*, so this is a choice with an expiry
+date rather than a preference. The line that must be revisited when the classic
+builder is removed is the `version` field in `src/Docker/BuildSpec.php`; the
+reopen condition is BuildKit gaining custom-network support, or a different
+egress design (e.g. a build-time proxy on the session network).
+
+Also settled by measurement, and encoded in the endpoint:
+
+- **The build's budget is the connection.** Nothing in the daemon bounds a
+  classic build, and the build's containers belong to the daemon — there is no
+  container here to kill. The broker sets the caller's timeout as both the idle
+  and the absolute HTTP timeout, and the daemon cancels a build whose client
+  disconnects. That is weaker than `exec`'s kill-at-deadline (a build that
+  overruns is *cut off*, not stopped gracefully) and it is the strongest
+  statement this endpoint can honestly make.
+- **The outcome is asked, not parsed.** After the stream, the broker asks the
+daemon whether the tagged image exists (`GET /images/{ref}/json`). Tagging only
+ever happens on success, so an image that exists is a build that finished —
+even if the clock cut the stream in the same instant. A *reported* failure
+skips the lookup, so a rebuild-over-an-old-image cannot have the stale artefact
+attributed to the failed build.
+- **Failures keep the daemon's own two shapes.** A build that runs and fails
+  mid-stream is a 200 with `image: null` and the daemon's words in `output` —
+  the same rule as a killed command. A build the daemon refuses before it
+  streams (a malformed query; or an environment where it cannot start one —
+  measured: `unshare: operation not permitted`) is an HTTP error and becomes
+  `502` carrying its words: it did not run, and calling that a failed build
+  would say it did. Both shapes were verified against a real daemon (29.8) with
+  the real reader, not only against mocks.
+- **Hitting the output cap does not cancel the build.** Cancelling the response
+  disconnects the client, which is exactly how the daemon cancels a build, so a
+  log cap must never do it — past the cap the reader keeps reading and stops
+  keeping (`truncated: true`). This is the one deliberate difference from the
+  log reader, where stopping early is free.
+- **The proxy needs `BUILD: 1`.** `tecnativa/docker-socket-proxy` gates
+  `/build` behind the `BUILD` variable and it is currently **unset** — measured:
+  `POST /build` returns `403` through the proxy today. So the endpoint is
+  unreachable in the deployed topology until the host-side variable is added;
+  `deploy/compose.yaml` and `bin/probe-guardrails.sh` carry that change, and the
+  probe line flips from "must be blocked" to "must be reachable" in the same
+  edit so the deployment cannot quietly stay half-done.
 
 **Step 5 — the MCP surface.** Last, deliberately. The MCP server is a thin
 wrapper over the broker's API and the API is the thing worth getting right;

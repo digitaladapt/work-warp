@@ -8,6 +8,69 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The scratch build path — step 4a (DOCKER-ACCESS.md §10).**
+  `POST /v1/sessions/{name}/build` runs a real `docker build` from a tar
+  context the caller streams, tagged `ww-<session>-<tag>:latest`. The request
+  body *is* the context and the parameters ride in the query
+  (`?tag=intl&network=session&timeout=1800`) — the same shape the daemon itself
+  uses (`POST /build?t=…` with a tar body), so the broker's edge and its
+  upstream agree about where each thing lives. New `src/Build/` (typed request,
+  capped context stream, runner, controller) and `src/Docker/BuildSpec.php`
+  (the one place a build query is assembled, field by field, from typed input —
+  `remote`, `extrahosts`, `cachefrom`, `buildargs`, `outputs`, `platform` and
+  `dockerfile` are not expressible).
+
+  Decisions, all measured against Docker 29.8 rather than assumed:
+
+  - **`version=1`, the classic builder, deliberately.** BuildKit refuses
+    `networkmode=<custom network>` ("network mode … not supported by buildkit");
+    the classic builder accepts it, and `network: session` is the whole point
+    of a non-hermetic build. The classic builder is deprecated upstream, so
+    `BuildSpec`'s `version` line is the one to revisit when it is removed; the
+    reopen condition is BuildKit gaining custom-network support.
+  - **The budget is the connection.** The caller's timeout is set as both the
+    idle and absolute HTTP timeout, and the daemon cancels a build whose client
+    disconnects — the only stop this endpoint has, and weaker than exec's
+    kill-at-deadline. A timed-out build is a 200 with `timed_out: true`, the
+    same rule as a killed command.
+  - **The outcome is asked, not parsed.** After the stream the broker asks the
+    daemon whether the tagged image exists (tagging only happens on success) —
+    except when the daemon reported a failure, where the lookup is skipped so a
+    stale artefact from a previous build cannot be attributed to the failure.
+  - **Hitting the output cap does not cancel the build.** Cancelling the
+    response disconnects the client, which is exactly how the daemon cancels a
+    build; past the cap the reader keeps reading and stops keeping, and says
+    `truncated`.
+  - **Tag grammar is the daemon's own reference grammar**, probed: `x-`, `x..y`,
+    `.x`, `x:tag`, `a/b` and uppercase are refused by the daemon, so they are a
+    `422` here rather than a `502` there.
+  - **Failures keep the daemon's own distinction, because it has one.** A
+    build that runs and fails mid-stream (a `RUN` exiting non-zero) is a `200`
+    with `image: null` and the diagnosis in `output` — the same rule as a
+    killed command. A build the daemon refuses *before* streaming (a malformed
+    query, or an environment where it cannot start one — measured: `unshare:
+    operation not permitted`) is an HTTP error from the daemon and becomes the
+    broker's `502`, carrying the daemon's words. It did not run, and calling
+    that a "failed build" would say it did. The reader classifies both from a
+    real daemon's behaviour, verified live during development, not only against
+    the mock.
+  - The context is capped at 128 MiB, enforced twice: on the declared
+    `Content-Length` when present (refused before reading), and by counting
+    real bytes while streaming (a chunked request declares nothing, and a
+    declaration is a claim, not a measurement).
+
+  **Deployment note:** the socket proxy gates `/build` behind `BUILD` and it
+  was unset, so `deploy/compose.yaml` now carries `BUILD: 1` and
+  `bin/probe-guardrails.sh` reports `/build` as information (reachable is the
+  intended end state now; blocked means the variable has not been applied yet).
+  Until the host applies it, the endpoint answers `502` — the proxy refusing
+  `/build`. `deploy/README.md` records the change as pending.
+
+  The `Utf8` scrubber moved from a private `ExecController` helper to
+  `src/Support/Utf8.php`, shared by both endpoints, and `SessionNetwork`
+  (`src/Session/`) was extracted when build became the second caller that needs
+  a session's network created lazily.
+
 - **The janitor and `reap` — step 3 (DOCKER-ACCESS.md §10).** This is where
   "cannot sit there forever" becomes true even when the broker is dead. Two
   shapes, one engine: `POST /v1/reap` sweeps on demand and returns the report

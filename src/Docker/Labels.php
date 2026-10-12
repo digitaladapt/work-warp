@@ -39,6 +39,13 @@ final class Labels
     public const string KIND_NETWORK = 'network';
 
     /**
+     * An image produced by a session's scratch build path: disposable,
+     * scoped to one session by its tag (`ww-<session>-<tag>`), and labelled
+     * so a future image-pruning sweep can tell whose it is.
+     */
+    public const string KIND_BUILD = 'build';
+
+    /**
      * The labels every workspace volume carries.
      *
      * No TTL: a volume is the thing a session *is*, and nothing sweeps it on a
@@ -69,6 +76,21 @@ final class Labels
             self::LABEL_CREATED_BY => self::CREATED_BY,
             self::LABEL_SESSION => $session->value,
             self::LABEL_KIND => self::KIND_NETWORK,
+        ];
+    }
+
+    /**
+     * The labels a built image carries. Same reasoning as the volume and the
+     * network: whose it is must be a label, not a guess made from the tag.
+     *
+     * @return array<string, string>
+     */
+    public static function buildImage(SessionName $session): array
+    {
+        return [
+            self::LABEL_CREATED_BY => self::CREATED_BY,
+            self::LABEL_SESSION => $session->value,
+            self::LABEL_KIND => self::KIND_BUILD,
         ];
     }
 }
