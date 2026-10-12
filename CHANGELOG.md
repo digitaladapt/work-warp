@@ -8,6 +8,56 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The compose harness — step 4b (DOCKER-ACCESS.md §10).**
+  `POST /v1/sessions/{name}/stack` — one endpoint, three actions
+  (`up`/`down`/`logs`), bringing a real multi-service stack up, down and into
+  one log artifact. New `src/Stack/` (typed request and services, the plan,
+  the container spec, the runner, the controller) plus three Docker-seam
+  additions (`pullImage`, `listVolumes`, `removeVolume`).
+
+  **The design answer, because step 4b asks a question rather than naming a
+  feature:** `docker compose` is a Docker API client and a session has no
+  daemon route by design, so the broker must run the stack — and the broker
+  must *not* run a caller-supplied compose file, because a compose file can
+  say `privileged: true`, `network_mode: host`, `volumes: [/:/host]`,
+  `devices:`. Validating one would be filtering, which this project has ruled
+  out once already. So the harness is a **typed vocabulary the broker renders
+  and executes itself** — compose at the altitude of `ContainerSpec`. The
+  compose-CLI path was measured first (`config` validates a rendered file,
+  labels scope a project) and is recorded as a named upgrade for the
+  *executor*: the caller-facing gate is the vocabulary either way.
+
+  Decisions, all measured or asserted:
+
+  - **Reachability by name dissolves PLAN §9's port landmine.** Services are
+    aliased on the session network; the e2e reaches `http://web:80` from an
+    `exec` with `network: session`. No port is ever published, so two stacks
+    cannot collide and nothing binds the host.
+  - **The second containment class, stated.** Stack services do not get
+    `CapDrop: ALL`/read-only rootfs/fixed uid — every real service image
+    breaks under those. They get: mounts whose sources are broker-created
+    named volumes (host paths and the socket are unexpressible),
+    `no-new-privileges`, pids/memory/stop limits, `Init`, the session network
+    and only it. Both the absences and the presences are asserted
+    (`StackContainerSpecTest`).
+  - **Resolve before acting.** `StackPlan` refuses unknown dependencies,
+    dependency cycles and `healthy` on a service with no health check *before
+    anything is created*, so a bad graph is a `422` rather than a half-started
+    stack.
+  - **`up` holds an exec slot; `down` and `logs` never do** — teardown reduces
+    load and a log read adds none, and refusing either while the budget is
+    full is exactly when the caller needs them.
+  - **Images are pulled when absent, never when present**, and the pull's
+    outcome is asked (`imageExists`), never parsed — verified live against a
+    real daemon, where a failed layer registration surfaced as a failed pull
+    with the daemon's own words. The pull path (`POST /images/create`) is
+    already forwarded by the deployed proxy, so **no deployment change** is
+    needed for this step.
+  - **`down` defaults to removing stack volumes** (the opposite of
+    `docker compose down`): this endpoint is a test teardown, and a leftover
+    database is how two runs contaminate each other. `keep_volumes: true` is
+    the inspecting case.
+
 - **The scratch build path — step 4a (DOCKER-ACCESS.md §10).**
   `POST /v1/sessions/{name}/build` runs a real `docker build` from a tar
   context the caller streams, tagged `ww-<session>-<tag>:latest`. The request

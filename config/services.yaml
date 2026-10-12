@@ -54,6 +54,7 @@ services:
             - '../src/Docker/'
             - '../src/Janitor/'
             - '../src/Build/'
+            - '../src/Stack/'
 
     # Controllers are registered explicitly with the tag that lets their action
     # arguments be resolved from the request.
@@ -118,6 +119,19 @@ services:
 
     # The build endpoint. A controller like any other.
     App\Build\BuildController:
+        tags: ['controller.service_arguments']
+
+    # ── The stack harness (step 4b) ─────────────────────────────────────────
+    # The compose-altitude form of the same argument: a typed vocabulary the
+    # broker renders and runs itself, because a session has no daemon route to
+    # run `docker compose` with, and a caller-supplied compose file is the
+    # hostile-body class the design excludes. Registered explicitly like every
+    # domain namespace; its DockerApi, Slots, SessionNetwork, logger and clock
+    # are autowired.
+    App\Stack\StackRunner:
+
+    # The stack endpoint. A controller like any other.
+    App\Stack\StackController:
         tags: ['controller.service_arguments']
 
     # The Docker client. One definition and one alias, so everything that

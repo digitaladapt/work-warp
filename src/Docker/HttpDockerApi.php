@@ -379,6 +379,217 @@ final class HttpDockerApi implements DockerApi
         throw $this->refused('look up the built image', $response);
     }
 
+    #[Override]
+    public function pullImage(string $image, float $timeoutSeconds, int $maxOutputBytes): PullOutput
+    {
+        if ($maxOutputBytes < 1) {
+            throw new InvalidArgumentException(\sprintf('maxOutputBytes must be at least 1, got %d', $maxOutputBytes));
+        }
+
+        $response = $this->call('POST', '/images/create', [
+            'query' => [
+                'fromImage' => ImageReference::name($image),
+                'tag' => ImageReference::tag($image),
+            ],
+            // The same clock shape as buildImage: idle and absolute are the
+            // same number, and the daemon treats a client disconnect as
+            // cancelling the operation.
+            'timeout' => $timeoutSeconds,
+            'max_duration' => $timeoutSeconds,
+        ]);
+
+        if (200 !== $this->status($response)) {
+            throw $this->refused('pull the image', $response);
+        }
+
+        return $this->readPullStream($response, $maxOutputBytes);
+    }
+
+    #[Override]
+    public function listVolumes(): array
+    {
+        // The same discipline as listContainers: the filter is this broker's
+        // own label, built here and never passed in, so the stack teardown
+        // cannot be aimed at a neighbour's volume either.
+        $response = $this->call('GET', '/volumes', [
+            'query' => [
+                'filters' => json_encode(
+                    ['label' => [Labels::LABEL_CREATED_BY.'='.Labels::CREATED_BY]],
+                    \JSON_THROW_ON_ERROR,
+                ),
+            ],
+        ]);
+
+        if (200 !== $this->status($response)) {
+            throw $this->refused('list the volumes', $response);
+        }
+
+        $listed = $this->decoded($response)['Volumes'] ?? null;
+
+        if (null === $listed) {
+            // The daemon answers `{"Volumes": null}` when the filter matches
+            // nothing; that is an empty set, not a malformed answer.
+            return [];
+        }
+
+        if (!\is_array($listed)) {
+            throw DockerRefused::because('the daemon listed volumes that are not an array');
+        }
+
+        $volumes = [];
+
+        foreach ($listed as $entry) {
+            if (!\is_array($entry)) {
+                throw DockerRefused::because('the daemon listed a volume that is not an object');
+            }
+
+            $volumes[] = VolumeSummary::fromApiVolume($entry);
+        }
+
+        return $volumes;
+    }
+
+    #[Override]
+    public function removeVolume(string $name): void
+    {
+        $response = $this->call('DELETE', '/volumes/'.$this->segment($name));
+
+        $status = $this->status($response);
+
+        // 404 is "already gone", the desired end state; anything else — in
+        // particular the daemon's container-conflict refusal — is real.
+        if (204 !== $status && 404 !== $status) {
+            throw $this->refused('remove the volume', $response);
+        }
+    }
+
+    /**
+     * Read a pull's stream: `docker pull`'s JSON progress lines, kept for
+     * their *errors* only.
+     *
+     * A pull's progress is megabytes of layer bookkeeping that no caller needs
+     * — the useful remainder is what went wrong. So `{"error":…}` lines are
+     * kept and everything else is read and dropped, bounded by the same cap as
+     * everything else. The read behaves exactly like the build reader's (see
+     * `readBuildStream` and its measurements): the idle and absolute budget
+     * are the same number, a cap hit does *not* cancel (cancelling disconnects
+     * the client, and the daemon treats that as cancelling the pull), and only
+     * the clock or a broken connection cancels.
+     */
+    private function readPullStream(ResponseInterface $response, int $maxOutputBytes): PullOutput
+    {
+        $output = '';
+        $truncated = false;
+        $timedOut = false;
+        $failed = false;
+        $buffer = '';
+        $drain = false;
+        $cancel = false;
+
+        try {
+            foreach ($this->http->stream($response) as $chunk) {
+                if ($chunk->isTimeout()) {
+                    $timedOut = true;
+                    $cancel = true;
+
+                    break;
+                }
+
+                if ($chunk->isFirst() || $chunk->isLast()) {
+                    continue;
+                }
+
+                $buffer .= $chunk->getContent();
+
+                while (false !== ($newline = strpos($buffer, "\n"))) {
+                    $line = substr($buffer, 0, $newline);
+                    $buffer = substr($buffer, $newline + 1);
+
+                    $piece = self::readPullLine($line);
+
+                    if ('' === $piece) {
+                        continue;
+                    }
+
+                    $failed = true;
+
+                    if ($drain) {
+                        continue;
+                    }
+
+                    [$output, $cut] = self::append($output, $piece, $maxOutputBytes);
+
+                    if ($cut) {
+                        $truncated = true;
+                        $drain = true;
+                    }
+                }
+
+                if (!$drain && \strlen($buffer) > $maxOutputBytes) {
+                    $truncated = true;
+                    $drain = true;
+                    $buffer = '';
+                }
+            }
+        } catch (TransportExceptionInterface $e) {
+            if ('' === $output && !$failed) {
+                throw DockerUnavailable::because('lost the Docker daemon while pulling the image: '.$e->getMessage());
+            }
+
+            $cancel = true;
+
+            if (str_contains($e->getMessage(), 'timed out')) {
+                $timedOut = true;
+            } else {
+                $truncated = true;
+            }
+        } finally {
+            if ($cancel) {
+                try {
+                    $response->cancel();
+                } catch (TransportExceptionInterface) {
+                    // The read already ended; there is nothing left to stop.
+                }
+            }
+        }
+
+        return new PullOutput($output, $truncated, $timedOut, $failed);
+    }
+
+    /**
+     * One pull progress line: kept only when it is an error.
+     *
+     * (`errorDetail` carries the same text as `error` in the daemon's stream;
+     * reading `error` alone keeps the kept output one line per failure rather
+     * than two.)
+     */
+    private static function readPullLine(string $line): string
+    {
+        $line = trim($line);
+
+        if ('' === $line) {
+            return '';
+        }
+
+        try {
+            $decoded = json_decode($line, true, 32, \JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            return '';
+        }
+
+        if (!\is_array($decoded)) {
+            return '';
+        }
+
+        $error = $decoded['error'] ?? null;
+
+        if (\is_string($error) && '' !== $error) {
+            return 'error: '.$error."\n";
+        }
+
+        return '';
+    }
+
     /**
      * Read the build progress until it ends, runs out of budget, or fills the
      * cap.

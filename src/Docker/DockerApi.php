@@ -176,6 +176,52 @@ interface DockerApi
      * cannot vouch for. The daemon answers 200 for a present image and 404 for
      * an absent one; anything else is a refusal, and a lookup the daemon
      * refused must never be read as "no" (the same rule as `volumeExists`).
+     *
+     * @phpstan-impure deliberately: the answer *changes* — a pull between two
+     *                  calls is exactly why callers ask twice (the stack
+     *                  runner asks before a pull and again after it, and the
+     *                  second answer must not be folded into the first by
+     *                  static analysis).
      */
     public function imageExists(string $reference): bool;
+
+    /**
+     * `POST /images/create` — the registry pull, with the timeout as both the
+     * idle and the absolute budget (the same clock shape as `buildImage`, for
+     * the same reason: a pull can stall, and the daemon documents that a
+     * client that disconnects cancels the operation).
+     *
+     * The stream is read and only the `{"error":…}` lines are kept, bounded by
+     * `$maxOutputBytes`; the *outcome* is never read from the text — callers
+     * confirm it with `imageExists`, and a pull that reported success but
+     * produced nothing is a failure like any other.
+     *
+     * Through the socket proxy this is `POST /images/create`, which the
+     * deployed policy already forwards (`IMAGES: 1` covers the section,
+     * `POST: 1` the method) — measured against the live proxy on 2026-10-07,
+     * where a pull succeeded through it. No deployment change: the stack
+     * harness pulls with the permissions the broker already has.
+     */
+    public function pullImage(string $image, float $timeoutSeconds, int $maxOutputBytes): PullOutput;
+
+    /**
+     * `GET /volumes`, filtered to the broker's own volumes and reduced to
+     * what a cleanup acts on.
+     *
+     * Like `listContainers`, the filter is built here from `Labels` and never
+     * passed in: the stack teardown is the second cleanup path this broker
+     * has, and it must not be aimable at a neighbour's volume either.
+     *
+     * @return list<VolumeSummary>
+     */
+    public function listVolumes(): array;
+
+    /**
+     * `DELETE /volumes/{name}`. Tolerates `404`: "gone" was the goal.
+     *
+     * A volume still attached to a running container is refused by the daemon,
+     * which is a real refusal and leaves as one — the caller's order is wrong,
+     * and this client does not guess at a retry.
+     */
+    public function removeVolume(string $name): void;
 }

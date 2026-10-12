@@ -126,11 +126,24 @@ What exists today:
 - The full quality gate: php-cs-fixer, PHPStan (level 6, empty baseline),
   PHPUnit, `composer audit`.
 
+- **The compose harness** (`src/Stack/`) — `POST /v1/sessions/{name}/stack`
+  brings up a real multi-service stack: `{"action": "up", "services": {...}}`
+  with `down` and `logs` beside it. This is the answer to "how does a
+  `docker compose up` test run when sessions have no daemon route?" — the
+  broker renders and runs the stack itself from a **typed vocabulary**
+  (compose altitude `ContainerSpec`), because a caller-supplied compose file
+  can express `privileged`, host binds and devices, and that class is exactly
+  what this design excludes. Services are reachable **by name** on the session
+  network (`http://web:80` from an `exec` with `network: session`) — no port
+  is ever published, so concurrent stacks cannot collide. `depends_on` gates
+  on `started` / `completed` / `healthy`, resolved before anything is created;
+  `up` holds a slot, `down`/`logs` never do; images are pulled when absent
+  (permissions the deployment already grants — no proxy change needed).
+
 What does not exist yet: `ps` and `GET`/`DELETE` for sessions, `stdin`
-delivery for `exec` (needs connection hijacking — currently a `501`), the
-compose harness, and the MCP surface. See DOCKER-ACCESS.md §10 for the build
-order; `ww-base/README.md` records the command image's contract and how to
-check it.
+delivery for `exec` (needs connection hijacking — currently a `501`), and the
+MCP surface. See DOCKER-ACCESS.md §10 for the build order; `ww-base/README.md`
+records the command image's contract and how to check it.
 
 ## Development
 

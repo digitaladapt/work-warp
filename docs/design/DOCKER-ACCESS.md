@@ -208,6 +208,10 @@ POST   /v1/sessions/{name}/exec     {cmd[], timeout, network, stdin?}
                                                        → {exit_code, stdout, stderr, truncated, ...}
 POST   /v1/sessions/{name}/build    ?tag=&network=&timeout=   (the body is the tar)
                                                        → {image, output, truncated, timed_out}
+POST   /v1/sessions/{name}/stack    {action: up|down|logs, services?, timeout?, keep_volumes?}
+                                                       → up: {services, failure, timed_out}
+                                                       → down: {containers_removed, volumes_removed, failures}
+                                                       → logs: {output, truncated}
 GET    /v1/sessions/{name}/ps                          → ww- containers for this session only
 POST   /v1/reap                                        → janitor: stop past-TTL, report
 GET    /healthz
@@ -863,6 +867,57 @@ attributed to the failed build.
   `deploy/compose.yaml` and `bin/probe-guardrails.sh` carry that change, and the
   probe line flips from "must be blocked" to "must be reachable" in the same
   edit so the deployment cannot quietly stay half-done.
+
+**Landed, in the harness half — and the answer is *not* a compose-file runner.**
+
+The question step 4b actually asks is: `docker compose` is a Docker API client,
+the session deliberately has no API route, so *what* runs the stack? The
+broker, because it is the only thing with the credential. But the broker must
+not run a caller-supplied compose file, because a compose file can say
+`privileged: true`, `network_mode: host`, `volumes: [/:/host]`, `devices:`,
+`cap_add:` — the hostile-body class this design excludes everywhere else, and
+validating a file would be *filtering*, which §2 has already ruled out once.
+
+So the harness is a **typed stack vocabulary the broker renders and executes
+itself**: `POST /v1/sessions/{name}/stack` with `{"action": "up"|"down"|"logs"}`
+and, for `up`, a map of services. `StackService` is the compose-altitude
+`ContainerSpec` — image, argv command, declared environment, named-volume
+mounts, `depends_on` with `started`/`completed`/`healthy` conditions, an argv
+health command. `StackPlan` resolves ordering (and refuses cycles, unknown
+dependencies, and `healthy` on a service with no health check) *before anything
+is created*; `StackContainerSpec` assembles the create payload field by field,
+with the same closed field set as the command path.
+
+Four things worth recording, each a decision rather than a detail:
+
+- **The second containment class, stated.** A stack *service* does not get
+  `CapDrop: ALL`, a read-only rootfs or the fixed command uid — every real
+  service image (postgres starting as root to become postgres, an app writing
+  package caches) breaks under those, and a stack that cannot run real images
+  is useless. What it does get: exactly the mounts the caller declared (sources
+  are `ww-stk-<session>-<name>` volumes the broker creates — host paths and the
+  socket are unexpressible, not refused), `no-new-privileges`, pids/memory/stop
+  limits, `Init`, `AutoRemove: false`, the session network and nothing else.
+  The difference is documented in `StackContainerSpec`'s table rather than
+  papered over; `StackContainerSpecTest` asserts both the absences and the
+  presences.
+- **Reachability by name, which dissolves PLAN §9's port landmine.** Services
+  are aliased on the session network, so the e2e reaches `http://web:80` from
+  an `exec` container with `network: session` — **no port is ever published**,
+  so two concurrent stacks cannot collide on one, and nothing binds the host.
+- **Pulls use permissions the deployment already has.** A stack image must be
+  present; `up` pulls it when it is not. That is `POST /images/create`, which
+  the proxy forwards today (`IMAGES`/`POST` are both on, measured 2026-10-07) —
+  so unlike `build`, 4b needs **no deployment change**.
+- **The compose-CLI path was tried first and is a named upgrade, not a plan.**
+  Measured on this host: `docker compose -p ww-<session> config` validates a
+  rendered file (labels, external `ww-net-<session>` network, `depends_on`),
+  and `down`/`logs`/`ps` find everything by project label alone. If the
+  rendering ever wants Compose's own semantics (profiles, `extends`, the
+  dependency scheduler writ large), the broker can switch its *executor* to the
+  CLI without changing the vocabulary a caller sees — the typed request stays
+  the gate either way. That is why the vocabulary was designed first and the
+  executor second.
 
 **Step 5 — the MCP surface.** Last, deliberately. The MCP server is a thin
 wrapper over the broker's API and the API is the thing worth getting right;
