@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Docker;
 
 use App\Session\SessionName;
+use App\Stack\StackService;
 
 /**
  * The `ww.` label vocabulary, in one place, for everything the broker names.
@@ -44,6 +45,28 @@ final class Labels
      * so a future image-pruning sweep can tell whose it is.
      */
     public const string KIND_BUILD = 'build';
+
+    /**
+     * A stack service container: long-running, brought up by `POST …/stack`,
+     * and — unlike a command — alive for as long as the stack is.
+     */
+    public const string KIND_STACK = 'stack';
+
+    /**
+     * A stack's service data volume (`ww-stk-<session>-<name>`): what the
+     * service persists, and what `down` removes when it is not asked to keep
+     * volumes.
+     */
+    public const string KIND_STACK_VOLUME = 'stack-volume';
+
+    /**
+     * Which service in the stack a container or volume belongs to.
+     *
+     * The service's own name, from `StackService` — never a container name or
+     * an id — so `down`, `logs` and a human reading `docker ps` all agree
+     * about what they are looking at.
+     */
+    public const string LABEL_SERVICE = 'ww.service';
 
     /**
      * The labels every workspace volume carries.
@@ -91,6 +114,50 @@ final class Labels
             self::LABEL_CREATED_BY => self::CREATED_BY,
             self::LABEL_SESSION => $session->value,
             self::LABEL_KIND => self::KIND_BUILD,
+        ];
+    }
+
+    /**
+     * The labels a stack service container carries.
+     *
+     * `ww.ttl` is the stack request's timeout plus the grace — the same rule
+     * as a command's: a stack abandoned while up is eventually swept, and a
+     * stack the caller is still using is not (its containers are re-created
+     * by every `up`, which moves the clock).
+     *
+     * @return array<string, string>
+     */
+    public static function stack(SessionName $session, StackService $service, int $ttl): array
+    {
+        return [
+            self::LABEL_CREATED_BY => self::CREATED_BY,
+            self::LABEL_SESSION => $session->value,
+            self::LABEL_KIND => self::KIND_STACK,
+            self::LABEL_SERVICE => $service->name,
+            self::LABEL_TTL => (string) $ttl,
+        ];
+    }
+
+    /**
+     * The labels a stack service volume carries. No TTL: like the workspace,
+     * a volume is removed by an explicit action (`down`), never by a clock —
+     * the janitor removes anonymous volumes with their container, but a named
+     * stack volume outlives any single container on purpose.
+     *
+     * No `ww.service` either: a volume is named after the *mount* the caller
+     * declared (`ww-stk-<session>-<name>`), and two services that share a
+     * mount share the volume — labelling it with one of them would be wrong
+     * for the other. The volume's name is the fact; the labels say whose
+     * session it is.
+     *
+     * @return array<string, string>
+     */
+    public static function stackVolume(SessionName $session): array
+    {
+        return [
+            self::LABEL_CREATED_BY => self::CREATED_BY,
+            self::LABEL_SESSION => $session->value,
+            self::LABEL_KIND => self::KIND_STACK_VOLUME,
         ];
     }
 }

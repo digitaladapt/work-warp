@@ -80,4 +80,34 @@ final class SessionName
     {
         return 'ww-'.$this->value.'-'.$tag->value;
     }
+
+    /**
+     * A stack service container: `ww-<session>-<service>-1`.
+     *
+     * The `-1` is Compose's numbering for a single-instance service, kept
+     * because it is the naming everyone already reads fluently — and because
+     * it cannot collide with a command container (`ww-<session>-<10 hex>`),
+     * whose suffix has no dash-number shape.
+     *
+     * Deterministic rather than random, deliberately: two `up`s racing in one
+     * session cannot both hold the same service, because the second create is
+     * a name conflict rather than a second container.
+     */
+    public function stackContainerName(string $service): string
+    {
+        return 'ww-'.$this->value.'-'.$service.'-1';
+    }
+
+    /**
+     * A stack service data volume: `ww-stk-<session>-<name>`.
+     *
+     * `stk` in the middle so a glance at `docker volume ls` separates a
+     * stack's data from a workspace (`ww-ws-…`) — and the name is generated
+     * here rather than supplied, so a caller cannot aim at a volume by typing
+     * its name. Ownership is still decided by labels.
+     */
+    public function stackVolume(string $name): string
+    {
+        return 'ww-stk-'.$this->value.'-'.$name;
+    }
 }

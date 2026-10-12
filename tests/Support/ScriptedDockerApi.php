@@ -10,6 +10,8 @@ use App\Docker\ContainerSummary;
 use App\Docker\DockerApi;
 use App\Docker\DockerRefused;
 use App\Docker\LogOutput;
+use App\Docker\PullOutput;
+use App\Docker\VolumeSummary;
 use Override;
 use Throwable;
 
@@ -80,6 +82,20 @@ final class ScriptedDockerApi implements DockerApi
     private array $images = [];
 
     /**
+     * How pulls behave until re-scripted: what the stream carries, and
+     * whether the pull *produces* the image it was asked for. The default is
+     * a successful silent pull — the common case — and the runner confirms
+     * pulls with `imageExists`, so `produces: false` models the silent
+     * failure the runner must still detect.
+     *
+     * @var array{output: string, truncated: bool, timedOut: bool, failed: bool, produces: bool}
+     */
+    private array $pullScript = ['output' => '', 'truncated' => false, 'timedOut' => false, 'failed' => false, 'produces' => true];
+
+    /** @var array<string, array<string, string>> volume name → labels, for listVolumes */
+    private array $volumeLabels = [];
+
+    /**
      * Script the next build: this stream result, and whether the tag exists
      * afterwards (i.e. whether the build produced an image).
      */
@@ -102,11 +118,41 @@ final class ScriptedDockerApi implements DockerApi
 
     /**
      * Seed an image that exists without having been built — the fixture for
-     * "the image was already there" cases.
+     * "the image was already there" cases (and for `up` after `build`: the
+     * scratch image is already present, so no pull happens).
      */
     public function seedImage(string $reference): void
     {
         $this->images[$reference] = true;
+    }
+
+    /**
+     * Script pulls until re-scripted: these stream facts, and whether a pull
+     * makes the image present (`produces: false` models the silent failure).
+     * The image marked present is the one the pull was *asked for* — the call
+     * argument — so tests never repeat an image name.
+     */
+    public function scriptNextPull(PullOutput $output, bool $produces = true): void
+    {
+        $this->pullScript = [
+            'output' => $output->output,
+            'truncated' => $output->truncated,
+            'timedOut' => $output->timedOut,
+            'failed' => $output->failed,
+            'produces' => $produces,
+        ];
+    }
+
+    /**
+     * A volume as both `GET /volumes` and `GET /volumes/{name}` would
+     * describe it, for teardown tests.
+     *
+     * @param array<string, string> $labels
+     */
+    public function seedVolume(string $name, array $labels): void
+    {
+        $this->volumes[$name] = $labels;
+        $this->volumeLabels[$name] = $labels;
     }
 
     /**
@@ -256,6 +302,10 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('inspectContainer');
         $this->mustHave($id);
 
+        if (!isset($this->containers[$id])) {
+            return $this->seededStatus($id) ?? ContainerStatus::running();
+        }
+
         $container = $this->containers[$id];
 
         if ($container['finished']) {
@@ -328,6 +378,15 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('containerLogs');
         $this->mustHave($id);
 
+        if (!isset($this->containers[$id])) {
+            // A seeded container: the next scripted logs, or nothing — the
+            // same contract as a created container that was never scripted.
+            $logs = $this->nextLogs ?? new LogOutput();
+            $this->nextLogs = null;
+
+            return $logs;
+        }
+
         return $this->containers[$id]['logs'] ?? new LogOutput();
     }
 
@@ -338,6 +397,7 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('createVolume');
 
         $this->volumes[$name] = $labels;
+        $this->volumeLabels[$name] = $labels;
     }
 
     #[Override]
@@ -378,6 +438,50 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('volumeExists');
 
         return isset($this->volumes[$name]);
+    }
+
+    #[Override]
+    public function pullImage(string $image, float $timeoutSeconds, int $maxOutputBytes): PullOutput
+    {
+        $this->record('pullImage', ['image' => $image, 'timeout' => $timeoutSeconds, 'maxOutputBytes' => $maxOutputBytes]);
+        $this->maybeFail('pullImage');
+
+        if ($this->pullScript['produces']) {
+            $this->images[$image] = true;
+        }
+
+        return new PullOutput(
+            $this->pullScript['output'],
+            $this->pullScript['truncated'],
+            $this->pullScript['timedOut'],
+            $this->pullScript['failed'],
+        );
+    }
+
+    #[Override]
+    public function listVolumes(): array
+    {
+        $this->record('listVolumes', []);
+        $this->maybeFail('listVolumes');
+
+        $volumes = [];
+
+        foreach ($this->volumeLabels as $name => $labels) {
+            if (isset($this->volumes[$name])) {
+                $volumes[] = VolumeSummary::fromApiVolume(['Name' => $name, 'Labels' => $labels]);
+            }
+        }
+
+        return $volumes;
+    }
+
+    #[Override]
+    public function removeVolume(string $name): void
+    {
+        $this->record('removeVolume', ['name' => $name]);
+        $this->maybeFail('removeVolume');
+
+        unset($this->volumes[$name], $this->volumeLabels[$name]);
     }
 
     #[Override]
@@ -447,9 +551,37 @@ final class ScriptedDockerApi implements DockerApi
 
     private function mustHave(string $id): void
     {
-        if (!isset($this->containers[$id])) {
-            throw DockerRefused::because('no such container: '.$id);
+        if (isset($this->containers[$id])) {
+            return;
         }
+
+        // Seeded containers (the janitor's and the stack's subjects) exist in
+        // the listing but not in the create-lifecycle map. They are real
+        // containers, so a call aimed at one must find it.
+        foreach ($this->listed as $summary) {
+            if ($summary->id === $id) {
+                return;
+            }
+        }
+
+        throw DockerRefused::because('no such container: '.$id);
+    }
+
+    /**
+     * A seeded container's status, from the listing's own state — running
+     * stays running, exited reports exit 0. (A command-path container's state
+     * lives in the create map and takes the run script; this branch exists for
+     * containers the broker did not just create.).
+     */
+    private function seededStatus(string $id): ?ContainerStatus
+    {
+        foreach ($this->listed as $summary) {
+            if ($summary->id === $id) {
+                return $summary->running ? ContainerStatus::running() : ContainerStatus::stopped(0);
+            }
+        }
+
+        return null;
     }
 
     /**

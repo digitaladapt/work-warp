@@ -18,21 +18,27 @@ final class ContainerStatus
     private function __construct(
         public readonly bool $running,
         public readonly ?int $exitCode,
+        public readonly ?string $health,
     ) {
     }
 
     /**
      * No exit code yet, by definition — asking a running container how it ended
      * would invent an answer.
+     *
+     * `$health` is the daemon's health-check state (`starting`, `healthy`,
+     * `unhealthy`) when the container declares a health check, and null when
+     * it does not. Read from `State.Health.Status`; the stack runner is the
+     * caller that needs it, because `healthy` is a dependency condition.
      */
-    public static function running(): self
+    public static function running(?string $health = null): self
     {
-        return new self(true, null);
+        return new self(true, null, $health);
     }
 
-    public static function stopped(?int $exitCode): self
+    public static function stopped(?int $exitCode, ?string $health = null): self
     {
-        return new self(false, $exitCode);
+        return new self(false, $exitCode, $health);
     }
 
     /**
@@ -46,12 +52,15 @@ final class ContainerStatus
             throw DockerRefused::because('inspecting the container returned no State block');
         }
 
+        $health = $state['Health'] ?? null;
+        $healthStatus = \is_array($health) && \is_string($health['Status'] ?? null) ? $health['Status'] : null;
+
         if (true === ($state['Running'] ?? false)) {
-            return self::running();
+            return self::running($healthStatus);
         }
 
         $exitCode = $state['ExitCode'] ?? null;
 
-        return self::stopped(\is_int($exitCode) ? $exitCode : null);
+        return self::stopped(\is_int($exitCode) ? $exitCode : null, $healthStatus);
     }
 }
