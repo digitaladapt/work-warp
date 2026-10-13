@@ -149,10 +149,31 @@ What exists today:
   keeps every volume; the default leaves nothing. One refusing container is
   a reported failure, never a stranded teardown.
 
+- **The MCP surface** (`src/Mcp/`, step 5) — the broker as an MCP server, so an
+  agent calls it directly rather than through a bespoke client. `POST /v1/mcp`
+  speaks streamable HTTP via the official `mcp/sdk`; it sits **under `/v1`** so
+  the bearer gate applies (an MCP endpoint outside the gate would be
+  unauthenticated remote command execution). Ten tools, each a thin call into
+  the object that already owned the operation: `run_command`, `quick_command`,
+  `create_session`, `list_sessions`, `get_session`, `ps`, `delete_session`,
+  `build_image`, `stack`, `reap`. `delete_session` is the one marked
+  destructive; exit codes are results, not errors; the broker's own refusal
+  sentences reach the model rather than a generic internal error.
+- **The package** — because an endpoint is not an integration. `ww://pkg`, an
+  MCP resource, serves the contract in one document: the endpoint and its auth,
+  what a session is, the shape of a command, what is deliberately absent, and
+  the tool list with its schemas — generated from the same catalogue the server
+  is built from, so it cannot drift. `GET /v1/pkg` and `GET /v1/pkg/tools`
+  serve the same JSON over plain HTTP for a caller writing an integration.
+- **The deployment artifact** (`deploy/`) — the broker service staged in
+  `deploy/compose.yaml` (two networks: `api` for callers, `backend` for the
+  proxy) plus `deploy/broker.env.example`. Staged, not rolled out: the compose
+  file mirrors the host, so this is applied on the host as a working-tree edit,
+  with the steps in `deploy/README.md`.
+
 What does not exist yet: `stdin` delivery for `exec` (needs connection
-hijacking — currently a `501`) and the MCP surface. See DOCKER-ACCESS.md §10
-for the build order; `ww-base/README.md` records the command image's contract
-and how to check it.
+hijacking — currently a `501`). See DOCKER-ACCESS.md §10 for the build order;
+`ww-base/README.md` records the command image's contract and how to check it.
 
 ## Development
 

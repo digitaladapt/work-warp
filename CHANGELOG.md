@@ -8,7 +8,85 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **The session surface — the rest of §5's session half.** Four endpoints
+- **The MCP surface, and the package around it — step 5 (DOCKER-ACCESS.md §10).**
+  `src/Mcp/`, built over the settled broker API as the design required, using
+  the official `mcp/sdk` (0.8.1) exactly as ContextShuttle does — which is the
+  "borrow the plumbing, not the ceiling" direction §5a asked for, now that the
+  API is what leads.
+
+  **`POST /v1/mcp`** speaks streamable HTTP. It lives **under `/v1` on purpose**:
+  the bearer gate covers `/v1` and only `/v1`, and this endpoint can start
+  stacks and run arbitrary commands, so an `/mcp` outside the gate would be
+  unauthenticated remote command execution. `/v1/mcp` matches the gate's own
+  `str_starts_with('/v1/')` test.
+
+  **Ten tools**, each a thin call into the object that already owned the
+  operation — there is no MCP-specific business logic and no second
+  implementation of anything:
+
+  | Tool | Calls | Hint |
+  |---|---|---|
+  | `run_command` | `ExecRunner` | not idempotent |
+  | `quick_command` | `ExecRunner` (1-minute ceiling, `cmd` defaults to `true`) | not idempotent |
+  | `create_session` | `SessionWorkspaces::ensure` | idempotent |
+  | `list_sessions` | `SessionWorkspaces::all` | read-only |
+  | `get_session` | `SessionContainers` + `SessionLedger` | read-only |
+  | `ps` | `SessionContainers` | read-only |
+  | `delete_session` | `SessionDestroyer` | **destructive** |
+  | `build_image` | `BuildRunner` | open-world |
+  | `stack` | `StackRunner` | open-world |
+  | `reap` | `Janitor` | idempotent |
+
+  Decisions, all deliberate:
+
+  - **Two command tools, and the docblock says it is not a privilege difference.**
+    `cmd` is arbitrary by design, so the schema cannot say what a good command
+    is; what a model can act on is the difference the names carry. Both build
+    the same `ExecRequest` and reach the same runner.
+  - **`stdin` is absent from both**, because the endpoint cannot honour it
+    (`501`, no connection hijacking) and a schema field that always fails is a
+    lie to the model. The workaround is in the description.
+  - **Exit codes are results, not errors.** A command that exits non-zero is a
+    success carrying `exit_code`; only a refusal *about the request* — no such
+    session, no free slot, an unrepresentable name, the daemon saying no —
+    becomes a tool error, and it carries the broker's own sentence rather than
+    the SDK's generic "Error while executing tool". That translation is one
+    class (`McpToolErrorTranslator`), the same point-every-handler-passes-through
+    idea ContextShuttle uses, with the engine's vocabulary as its allow-list.
+  - **Sessions are cached, not in-memory**, because the MCP handshake spans two
+    requests; the pool is a named `mcp_sessions` one so it can move to Redis
+    without touching the app cache.
+  - **The tool set is a catalogue, not discovery.** No directory scanning: what
+    the server offers is one readable list (`McpPackageCatalogue`), and the
+    package manifest is generated from it.
+
+  **The package, because an endpoint is not an integration.** `ww://pkg` is an
+  MCP resource and `GET /v1/pkg` (+ `/v1/pkg/tools`) is the same document over
+  plain HTTP: where the endpoint is, **that it is bearer-gated** (a client that
+  does not know will read the `401` as a broken server), what a session is and
+  that one must exist first, the shape of a command, **what is deliberately
+  absent** (`stdin`, mounts, host networking) so those read as decisions, and
+  the tool list. It is built from the same catalogue, so it cannot describe a
+  tool that is not there.
+
+  **The deployment artifact, staged.** `deploy/compose.yaml` gains the
+  `lyra-broker` service — two networks (`api` for callers, `backend` for the
+  proxy), `init`, resource caps, `:develop` pinned — plus
+  `deploy/broker.env.example` and a `.gitignore` rule so the real secrets file
+  cannot be committed. Staged rather than applied: the compose file mirrors the
+  host, and `deploy/README.md` carries the rollout steps.
+
+  Tests: `McpApiTest` drives the real handshake, `tools/list`, a `tools/call`
+  that reaches the runner, the refusal path, schema validation refusing an
+  empty `cmd` before Docker is touched, and the manifest over both transports.
+  Full suite **369 tests / 1124 assertions**.
+
+  **Deployment dependency:** `mcp/sdk` 0.8.1 (plus `opis/json-schema`,
+  `opis/uri`, `symfony/uid` transitively) and `psr/simple-cache` — the latter
+  required explicitly because `symfony/cache`'s `Psr16Cache` needs the
+  interface, and without it every MCP request 500s (measured).
+
+- **The session surface — the rest of §5's session half (PR #19).** Four endpoints
   beside the create, all in `src/Session/SessionController.php`:
 
   - `GET /v1/sessions` — every session, discovered from the volumes carrying

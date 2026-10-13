@@ -10,6 +10,8 @@
         "ext-ctype": "*",
         "ext-iconv": "*",
         "guzzlehttp/psr7": "^2.13.1",
+        "mcp/sdk": "0.8.1",
+        "psr/simple-cache": "^3.0",
         "symfony/clock": "8.1.*",
         "symfony/console": "8.1.*",
         "symfony/dotenv": "8.1.*",

@@ -7,8 +7,6 @@ namespace App\Session;
 use App\Docker\DockerApi;
 use App\Docker\DockerRefused;
 use App\Docker\DockerUnavailable;
-use App\Docker\Labels;
-use App\Docker\VolumeSummary;
 use Symfony\Component\HttpFoundation\Exception\JsonException;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -52,6 +50,7 @@ final class SessionController
 {
     public function __construct(
         private readonly DockerApi $docker,
+        private readonly SessionWorkspaces $workspaces,
         private readonly SessionContainers $containers,
         private readonly SessionLedger $ledger,
         private readonly SessionDestroyer $destroyer,
@@ -84,38 +83,26 @@ final class SessionController
         }
 
         try {
-            if ($this->docker->volumeExists($session->workspaceVolume())) {
-                return self::respond($session, Response::HTTP_OK);
-            }
-
-            $this->docker->createVolume($session->workspaceVolume(), Labels::workspace($session));
+            // `ensure` owns the definition of a session (a labelled workspace
+            // volume) for every surface that needs it; the boolean is the
+            // whole of the ensure semantics, and the status is all a client
+            // needs from it.
+            $created = $this->workspaces->ensure($session);
         } catch (DockerUnavailable|DockerRefused $e) {
             return self::dockerError($e);
         }
 
-        return self::respond($session, Response::HTTP_CREATED);
+        return self::respond($session, $created ? Response::HTTP_CREATED : Response::HTTP_OK);
     }
 
     #[Route('/v1/sessions', name: 'session_list', methods: ['GET'])]
     public function list(): JsonResponse
     {
         try {
-            $sessions = [];
-
-            foreach ($this->docker->listVolumes() as $volume) {
-                $name = $this->workspaceNameOf($volume);
-
-                if (null === $name) {
-                    continue;
-                }
-
-                $sessions[] = ['session' => $name, 'workspace' => $volume->name];
-            }
+            $sessions = $this->workspaces->all();
         } catch (DockerUnavailable|DockerRefused $e) {
             return self::dockerError($e);
         }
-
-        usort($sessions, static fn (array $a, array $b): int => strcmp($a['session'], $b['session']));
 
         return new JsonResponse($sessions, Response::HTTP_OK, ['Cache-Control' => 'no-store']);
     }
@@ -223,36 +210,6 @@ final class SessionController
         } catch (InvalidSessionName $e) {
             return self::invalid($e->getMessage());
         }
-    }
-
-    /**
-     * A listed volume's session name, when it is a workspace.
-     *
-     * The label is the authority: `ww.kind=workspace` plus a `ww.session`
-     * value are what make a volume a session, and the name prefix is only
-     * what makes the answer readable. A volume whose label does not parse is
-     * skipped, not guessed at — the same rule the janitor applies to
-     * containers with an unreadable session.
-     */
-    private function workspaceNameOf(VolumeSummary $volume): ?string
-    {
-        if (($volume->labels[Labels::LABEL_KIND] ?? null) !== Labels::KIND_WORKSPACE) {
-            return null;
-        }
-
-        $session = $volume->labels[Labels::LABEL_SESSION] ?? null;
-
-        if (null === $session) {
-            return null;
-        }
-
-        try {
-            SessionName::from($session);
-        } catch (InvalidSessionName) {
-            return null;
-        }
-
-        return $session;
     }
 
     /**

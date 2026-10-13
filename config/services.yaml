@@ -19,6 +19,13 @@ parameters:
     env(WW_MAX_CONCURRENCY): '2'
     env(WW_TTL_GRACE): '300'
 
+    # The name and version the MCP server reports as its own, and that the
+    # package manifest publishes. Parameters rather than literals so a release
+    # sets them in one place; the version is the running build's, not whatever
+    # Composer's metadata happens to say.
+    ww_mcp_server_name: 'work-warp'
+    ww_mcp_server_version: '1.0.0'
+
     # The socket proxy the broker talks to. Readiness reports whether this is
     # set at all; nothing dials it at boot, because a Docker daemon being down
     # must not stop the broker from starting (the same rule the other services
@@ -63,6 +70,11 @@ services:
             - '../src/Janitor/'
             - '../src/Build/'
             - '../src/Stack/'
+            # The MCP surface is registered explicitly below: its tool classes
+            # are services the SDK fetches by id (so they must stay public),
+            # and its catalogue/manifest are plain services. Scanning the
+            # namespace would register the tool *value* shapes too.
+            - '../src/Mcp/'
 
     # Controllers are registered explicitly with the tag that lets their action
     # arguments be resolved from the request.
@@ -117,9 +129,18 @@ services:
     # ── The session surface (GET list/show/ps, DELETE) ──────────────────────
     # The read and destroy halves, registered explicitly like every domain
     # namespace: src/Session/ is excluded from auto-registration above for its
-    # value objects. All three take collaborators by type; only the two whose
+    # value objects. All three take collaborators by type; only the ones whose
     # dependencies are excluded namespaces name them explicitly, following
     # SessionNetwork and LedgerWriter.
+    #
+    # SessionWorkspaces owns the *definition* of a session (a labelled
+    # workspace volume), for every surface that asks — the HTTP endpoints and
+    # the MCP tools both read it, which is why it is one service and not a few
+    # lines in a controller.
+    App\Session\SessionWorkspaces:
+        arguments:
+            $docker: '@App\Docker\DockerApi'
+
     App\Session\SessionContainers:
         arguments:
             $docker: '@App\Docker\DockerApi'
@@ -211,3 +232,56 @@ services:
     App\Security\BrokerTokenListener:
         arguments:
             $configuredToken: '%env(WW_TOKEN)%'
+
+    # ── The MCP surface (step 5) ────────────────────────────────────────────
+    # Registered explicitly like every domain namespace: src/Mcp/ is excluded
+    # from auto-registration above for its value objects (the catalogue's
+    # arrays, the tool classes' collaborators) and because a tool is a *service*
+    # with constructor dependencies, not something the container should build
+    # by scanning a directory.
+    #
+    # The tool classes are public on purpose: the SDK resolves a tool handler by
+    # `[class, method]` through the PSR-11 container (the `service_container`
+    # handed to the factory), and `has()` on a private service answers false —
+    # so a private tool is a tool that cannot be called. Declared as a
+    # namespace resource with `public: true` rather than four separate blocks:
+    # a later individual definition would silently drop the flag (measured —
+    # a per-service `public: true` followed by this resource registration left
+    # every tool private, and every call answered -32603).
+    App\Mcp\Tools\:
+        resource: '../src/Mcp/Tools/'
+        public: true
+
+    # The catalogue and the manifest are plain services; the manifest is also
+    # read by the HTTP controller.
+    App\Mcp\McpPackageCatalogue: ~
+    App\Mcp\McpResourceRegistrar: ~
+
+    # Public for the same reason the tools are: `ww://pkg`'s handler is
+    # `[PackageManifest::class, 'read']`, resolved through the PSR-11 container.
+    # Private, the SDK falls back to `new PackageManifest()` — which needs two
+    # arguments — and every resource read answers "Error while reading
+    # resource" (measured).
+    App\Mcp\PackageManifest:
+        public: true
+        arguments:
+            $serverVersion: '%ww_mcp_server_version%'
+
+    # The MCP controller. Tagged so its action argument resolves from the
+    # request, like every other controller.
+    App\Mcp\McpController:
+        tags: ['controller.service_arguments']
+
+    App\Mcp\PackageController:
+        tags: ['controller.service_arguments']
+
+    # The factory assembles the SDK's server per request. `$container` is the
+    # service container so tool handlers resolve through PSR-11; the session
+    # pool is the named `mcp_sessions` one (see config/packages/cache.yaml).
+    App\Mcp\McpServerFactory:
+        arguments:
+            $container: '@service_container'
+            $sessionPool: '@mcp_sessions'
+            $serverName: '%ww_mcp_server_name%'
+            $serverVersion: '%ww_mcp_server_version%'
+

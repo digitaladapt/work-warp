@@ -29,6 +29,14 @@
 /var/phpstan/
 ###< phpstan ###
 
+###> deploy secrets ###
+# The live broker env file: real secrets (APP_SECRET, WW_TOKEN), copied from
+# broker.env.example on the host and never committed — the same rule as /.env,
+# and the reason the example file exists. deploy/compose.yaml references it via
+# `env_file:` alongside the stack's other per-service env files.
+/deploy/broker.env
+###< deploy secrets ###
+
 ###> project tooling ###
 # Auto-generated IDE-support dump; regenerated on demand, never hand-edited.
 /config/reference.php
