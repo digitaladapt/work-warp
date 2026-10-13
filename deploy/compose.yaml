@@ -87,3 +87,54 @@ services:
     volumes:
       - ./terminal:/home/user
 
+
+  # work-warp broker (the only thing that holds the Docker credential)
+  #
+  # STAGED, NOT YET ROLLED OUT. This file mirrors the host's working copy
+  # (deploy/README.md, "Read this first"), so this service is written here for
+  # review and applied on the host as an uncommitted working-tree edit — the
+  # same shape the original rollout used. Until it is applied, nothing on
+  # lyra_backend is the broker and /v1 has no server behind it.
+  #
+  # Two networks, deliberately: `api` to be reached by the callers (the
+  # terminal, and later task-loom), `backend` to reach the socket proxy and
+  # nothing else. The broker is the only container that joins both.
+  lyra-broker:
+    container_name: lyra-broker
+    # Pinned to the tag the bake publishes, not :latest — the same reasoning as
+    # the proxy pin below. `:develop` is the integration tag.
+    image: digitaladapt/work-warp:develop
+    init: true
+    restart: unless-stopped
+    expose:
+      - 80                  # FrankenPHP's Caddy listens on 80 by default
+    networks:
+      - api
+      - backend
+    # Config and secrets ride in a file beside this one, exactly as `webui.env`
+    # and `terminal.env` do for their services — and for the same reason: the
+    # compose file is committed, the env file is not. It must define at least
+    # APP_SECRET (the broker refuses to boot without it — the entrypoint says
+    # so) and WW_TOKEN (unset, the gate refuses every /v1 request rather than
+    # allowing anonymous callers). See deploy/broker.env.example.
+    env_file:
+      - broker.env
+    environment:
+      APP_ENV: prod
+      # The proxy on the backend network. Not a unix socket, ever: the broker
+      # reaches Docker through the TCP proxy, and `baseUrl()` refuses `unix:`
+      # by name (SECURITY.md).
+      WW_DOCKER_HOST: tcp://lyra-dockerproxy:2375
+      # The command image — the base published by the same bake run.
+      WW_IMAGE: digitaladapt/work-warp:develop-base
+      WW_MAX_CONCURRENCY: "4"
+      WW_TTL_GRACE: "300"
+      WW_JANITOR_INTERVAL: "60"
+    # Bounded like the proxy: this container holds the Docker credential, so a
+    # memory or fork bomb here is the worst place to have one.
+    mem_limit: 512m
+    pids_limit: 512
+    logging:
+      driver: syslog
+      options:
+        tag: lyra-broker

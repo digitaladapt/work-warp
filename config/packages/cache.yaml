@@ -11,9 +11,20 @@ framework:
         #app: cache.adapter.redis
         #default_redis_provider: redis://localhost
 
-        # APCu (not recommended with heavy random-write workloads as memory fragmentation can cause perf issues)
-        #app: cache.adapter.apcu
-
-        # Namespaced pools use the above "app" backend by default
-        #pools:
-            #my.dedicated.cache: null
+        pools:
+            # MCP session storage (McpServerFactory::sessionStore()).
+            #
+            # A dedicated pool rather than cache.app so sessions can be flushed,
+            # relocated to Redis, or expired on their own schedule without
+            # disturbing the application cache. The SDK requires a store that
+            # survives between requests, because the MCP handshake
+            # (`initialize` → later `tools/call`) spans at least two of them —
+            # under FrankenPHP as much as under any other SAPI.
+            #
+            # Cache-backed storage is already the documented option for
+            # multi-worker deployments. If a shared backend is needed, use
+            # `cache.adapter.redis` here — NOT a per-worker in-memory adapter,
+            # or sessions stop resolving on any worker other than the one that
+            # handled `initialize`.
+            mcp_sessions:
+                adapter: cache.adapter.filesystem

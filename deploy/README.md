@@ -231,6 +231,104 @@ editing the file to match reality is cheaper than renaming a live network.
 
 ---
 
+## Rollout: the broker — **staged 2026-10-13, not yet applied**
+
+`compose.yaml` now carries a fourth service, `lyra-broker`. It is **staged, not
+rolled out**: this file mirrors the host's working copy, so the service is
+written here for review and applied on the host as a working-tree edit — the
+same shape the original rollout used. Until it is applied, nothing serves `/v1`.
+
+### Why it is the only new container that joins two networks
+
+The broker is the only thing that holds the Docker credential, so it is the only
+thing that must reach both the callers and the socket proxy:
+
+| Network | Who is on it | Why |
+|---|---|---|
+| `lyra_api` | `lyra-terminal`, `lyra-broker` | Callers reach the broker's API. The terminal never needs the proxy network again. |
+| `lyra_backend` | `lyra-dockerproxy`, `lyra-broker` | The broker reaches the proxy and nothing else. |
+
+The terminal stays off `lyra_backend` — that removal (2026-10-07) is what makes
+the broker the *only* path to Docker, and this rollout does not undo it.
+
+### The steps
+
+1. **Publish the images** if the bake has not already: `:develop` (the broker)
+   and `:develop-base` (the command image) are built by the docker workflow on
+   every push to `main`, so they exist. Check with
+   `docker image ls digitaladapt/work-warp`.
+
+2. **Create the env file.** On the host, beside the live compose file:
+
+   ```bash
+   cd /home/andrew/apps/lyra
+   cp /home/andrew/apps/lyra/terminal/work-warp/deploy/broker.env.example broker.env
+   # fill in APP_SECRET and WW_TOKEN — both `openssl rand -hex 32`
+   ```
+
+   `broker.env` is gitignored and must stay so; the example file is the
+   committed half of the pair.
+
+3. **Add the service and bring it up.** Apply the `lyra-broker` block from
+   `compose.yaml` to the live file, then:
+
+   ```bash
+   cd /home/andrew/apps/lyra
+   docker compose up -d lyra-broker
+   ```
+
+4. **Prove it before trusting it.** From a throwaway container on `lyra_api`,
+   so a broken broker cannot affect anything:
+
+   ```bash
+   docker run --rm --network lyra_api curlimages/curl:latest sh -c '
+     curl -fsS http://lyra-broker/health && echo && \
+     curl -fsS -H "Authorization: Bearer $WW_TOKEN" http://lyra-broker/v1/pkg | head -c 400'
+   ```
+
+   `/health` is open and answers `{"status":"ok"}`. `/v1/pkg` needs the token
+   and answers the package manifest. **A `401` without the token and a `200`
+   with it is the whole point** — that is the gate doing its job on the MCP
+   surface's own path.
+
+5. **The check that can now finally fail** — §10c check 3, open since
+   2026-10-07: re-run the network checks from Stage 2 *while holding the
+   broker's token*. The broker exists now, so a network mistake can no longer
+   hide behind an absent credential:
+
+   ```bash
+   # From inside lyra-terminal:
+   ww-run guard-test                       # must pass
+   ls /var/run/docker.sock                 # must not exist
+   echo $DOCKER_HOST                       # must be empty
+   getent hosts lyra-dockerproxy           # must FAIL — the terminal is off lyra_backend
+   curl -fsS http://lyra-broker/health     # must SUCCEED — the broker is on lyra_api with the terminal
+   ```
+
+   The last two lines are the pair that matters, and they pull in opposite
+   directions on purpose: the terminal **can** reach the broker (that is the
+   whole point — the broker talks to Docker on the terminal's behalf, so the
+   terminal need not), and **cannot** reach the proxy (that is what makes the
+   broker the only path). A rollout where `lyra-dockerproxy` resolves from the
+   terminal has re-opened the 2026-10-07 removal, whatever the compose file
+   says.
+
+6. **Point `ww-run` at the broker** (DOCKER-ACCESS.md §9) once it is up:
+   `WW_BROKER=http://lyra-broker`, and the token. Until that lands, `ww-run` is
+   still the daemon-direct client it was, which is why nothing depends on this
+   rollout being done in one sitting.
+
+### What to check afterwards
+
+- `docker compose ps` shows `lyra-broker` up, on `api` and `backend`.
+- `docker logs lyra-broker` shows no `PathException` (the boot bug fixed in
+  PR #18) and, if `WW_DOCKER_HOST` is set, either sweeps or a single honest
+  warning about the host.
+- The janitor is running as the broker's child — its log lines appear every
+  `WW_JANITOR_INTERVAL` seconds.
+
+---
+
 ## Rollout: two stages, smallest first — **executed 2026-10-07**
 
 This section is the record of how the stack moved to its current shape, kept

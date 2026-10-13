@@ -956,3 +956,41 @@ wrapper over the broker's API and the API is the thing worth getting right;
 writing the wrapper first would freeze the wrong interface. ContextShuttle is the
 template for the PHP/OpenAPI plumbing, and it is a good one — but its shape should
 follow this API, not lead it.
+
+**Landed 2026-10-13, and the ordering paid off in a way worth recording.** The
+wrapper really was thin: ten tools, each a call into an object that already
+existed (`ExecRunner`, `StackRunner`, `SessionDestroyer`, `Janitor`,
+`SessionWorkspaces`). No MCP-specific business logic and no second
+implementation of a single rule — which is what "over a settled API" was for.
+ContextShuttle was the template for the plumbing (`mcp/sdk`, the
+Symfony-request-to-PSR-7 controller, the `[class, method]` handlers resolved
+through PSR-11, the one error-translation point), and its shape did follow this
+API rather than lead it, exactly as §5a predicted.
+
+Four things this step decided rather than inherited:
+
+- **The endpoint lives at `/v1/mcp`, not `/mcp`.** The bearer gate covers `/v1`
+  and only `/v1`; this endpoint runs commands and starts stacks, so outside the
+  gate it would be unauthenticated remote command execution. The path is not a
+  preference — it is the difference between a gated surface and an open one.
+- **Two command tools, and it is not a privilege difference.** `run_command`
+  requires `cmd` and allows half an hour; `quick_command` defaults `cmd` to
+  `true` with a one-minute ceiling. Both build the same `ExecRequest` and reach
+  the same `ExecRunner`; the pair is naming for a model to act on.
+- **`stdin` is absent from the tool schemas**, because the endpoint cannot
+  honour it (no connection hijacking, `501`). A schema field that always fails
+  is a lie to the model; the workaround lives in the description, where a
+  decision belongs.
+- **Exit codes are results, not errors.** A command that exits non-zero returns
+  `exit_code`; only a refusal *about the request* is a tool error, and it
+  carries the broker's own sentence. One class does that translation, at the
+  single point every handler passes through — the same idea ContextShuttle's
+  `ToolFailureTranslatingReferenceHandler` uses, with this engine's refusal
+  vocabulary as its allow-list.
+
+**The package, because an endpoint is not an integration.** `ww://pkg` (an MCP
+resource) and `GET /v1/pkg` serve one generated document: the endpoint and that
+it is bearer-gated, what a session is, the shape of a command, what is
+deliberately *absent* (`stdin`, mounts, host networking — stated as decisions
+rather than omissions), and the tool list. It is generated from the same
+catalogue the server registers, so it cannot describe a tool that is not there.
