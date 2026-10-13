@@ -318,6 +318,94 @@ the broker the *only* path to Docker, and this rollout does not undo it.
    still the daemon-direct client it was, which is why nothing depends on this
    rollout being done in one sitting.
 
+### Wiring a client to it
+
+The broker is useless until something holds the same token it does. There are
+two kinds of client, and they are configured in two different places — which is
+worth stating because getting it wrong looks like a broken broker rather than a
+missing configuration (`401`, which the MCP manifest warns about for exactly
+this reason).
+
+**A client inside the stack (the terminal today, task-loom later).** The token
+goes in that service's env file, not in `compose.yaml` — the compose file is
+committed and the env file is not, and `environment:` in compose would *override*
+an `env_file` value, so a `${WW_TOKEN:-}` there would silently blank a real one.
+For the terminal, add to `/home/andrew/apps/lyra/terminal.env`:
+
+```sh
+# The same value as broker.env's WW_TOKEN — this is the client half of the
+# shared secret, and the broker refuses every /v1 request it does not match.
+WW_TOKEN=<the same value you put in broker.env>
+
+# Inert until DOCKER-ACCESS.md §9 lands (it is what ww-run will read instead of
+# DOCKER_HOST). Written now so the value is in place when it is.
+WW_BROKER=http://lyra-broker
+```
+
+Both are read at the terminal's start, so it needs a restart to pick them up.
+
+**A client outside the stack (an MCP client on your machine).** The broker has no
+published port, and that is deliberate — it is reachable from the networks it is
+on, not from the host. Two ways to get to it, and the second is the one that does
+not change the deployment:
+
+1. **Publish a port** — add `ports: ['8300:80']` to `lyra-broker` and reach
+   `http://localhost:8300/v1/mcp`. This *is* a deployment change: the broker's
+   API becomes reachable from anything that can reach the host, so if you do it,
+   do it behind the reverse proxy rather than on a bare `localhost` bind.
+2. **Pipe it over SSH** — no deployment change, and the token never leaves the
+   host:
+
+   ```bash
+   ssh -N -L 8300:lyra-broker:80 andrew@host   # lyra-broker resolves inside the stack
+   ```
+
+   An MCP client then talks to `http://localhost:8300/v1/mcp`.
+
+**The MCP client configuration.** For a client that speaks streamable HTTP with
+a bearer header (Claude Desktop and most others take this shape — check yours):
+
+```json
+{
+  "mcpServers": {
+    "workwarp": {
+      "url": "http://localhost:8300/v1/mcp",
+      "headers": { "Authorization": "Bearer <the same WW_TOKEN>" }
+    }
+  }
+}
+```
+
+**How to tell it worked, in two calls, with no MCP client at all** — and this is
+the check to run before blaming a client:
+
+```bash
+TOKEN=<the same WW_TOKEN>
+
+# 1. The package: what this server is and how to call it.
+curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8300/v1/pkg | head -c 600
+
+# 2. A real command, end to end. The MCP handshake is two requests: the first
+#    mints a session id, and the second carries it.
+SID=$(curl -sS -D- -o/dev/null -X POST http://localhost:8300/v1/mcp \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
+
+curl -sS -X POST http://localhost:8300/v1/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"quick_command","arguments":{"session":"demo","cmd":["uname","-a"]}}}'
+```
+
+That second call is **the whole system working**: the broker created a container
+from `:develop-base`, ran `uname -a` in it against the `demo` workspace, and
+returned the exit code. If it answers `isError` with "there is no session named
+demo", that is the other half of the design talking — create the session first
+(`create_session`, or `POST /v1/sessions`) and note that a mistyped name did
+*not* create one on the way past.
+
 ### What to check afterwards
 
 - `docker compose ps` shows `lyra-broker` up, on `api` and `backend`.
