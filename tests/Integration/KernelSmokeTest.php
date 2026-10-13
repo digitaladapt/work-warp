@@ -86,19 +86,28 @@ final class KernelSmokeTest extends WebTestCase
      * clean refusal rather than a 500. (An unknown path is covered in
      * `BrokerTokenGateTest`, where the interesting property is that it answers
      * 401 without a token and 404 with one.).
+     *
+     * `GET` used to be the wrong method here — before the session surface
+     * landed, `/v1/sessions` existed for `POST` alone. It now answers `GET`
+     * with the session list, which is why the wrong method is `PUT`: a method
+     * no route on this path accepts.
      */
     public function test_an_existing_route_with_the_wrong_method_is_a_clean_refusal(): void
     {
         /** @var KernelBrowser $client */
         $client = self::createClient();
 
-        $client->request('GET', '/v1/sessions', [], [], ['HTTP_AUTHORIZATION' => 'Bearer test-token']);
+        $client->request('PUT', '/v1/sessions', [], [], ['HTTP_AUTHORIZATION' => 'Bearer test-token']);
 
         self::assertSame(
             Response::HTTP_METHOD_NOT_ALLOWED,
             $client->getResponse()->getStatusCode(),
-            'the route exists for POST; GET must be a 405 with an Allow header, not a crash',
+            'the route exists for POST and GET; PUT must be a 405 with an Allow header, not a crash',
         );
-        self::assertStringContainsString('POST', (string) $client->getResponse()->headers->get('Allow'));
+
+        $allow = (string) $client->getResponse()->headers->get('Allow');
+
+        self::assertStringContainsString('POST', $allow);
+        self::assertStringContainsString('GET', $allow);
     }
 }

@@ -775,6 +775,20 @@ final class HttpDockerApi implements DockerApi
     }
 
     #[Override]
+    public function removeNetwork(string $name): void
+    {
+        $response = $this->call('DELETE', '/networks/'.$this->segment($name));
+
+        $status = $this->status($response);
+
+        // 404 is "already gone", the desired end state; anything else — in
+        // particular the daemon's active-endpoints refusal — is real.
+        if (204 !== $status && 404 !== $status) {
+            throw $this->refused('remove the session network', $response);
+        }
+    }
+
+    #[Override]
     public function createVolume(string $name, array $labels): void
     {
         $response = $this->call('POST', '/volumes/create', [

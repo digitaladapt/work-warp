@@ -114,6 +114,28 @@ services:
         arguments:
             $docker: '@App\Docker\DockerApi'
 
+    # ── The session surface (GET list/show/ps, DELETE) ──────────────────────
+    # The read and destroy halves, registered explicitly like every domain
+    # namespace: src/Session/ is excluded from auto-registration above for its
+    # value objects. All three take collaborators by type; only the two whose
+    # dependencies are excluded namespaces name them explicitly, following
+    # SessionNetwork and LedgerWriter.
+    App\Session\SessionContainers:
+        arguments:
+            $docker: '@App\Docker\DockerApi'
+
+    # The ledger read goes through ExecRunner on purpose — the same rule as
+    # the janitor's write: the ledger lives inside the workspace volume, and
+    # the only process that can reach it is a disposable container with the
+    # workspace mounted, using the same constraints and image as any command.
+    App\Session\SessionLedger:
+        arguments:
+            $runner: '@App\Exec\ExecRunner'
+
+    App\Session\SessionDestroyer:
+        arguments:
+            $docker: '@App\Docker\DockerApi'
+
     # ── The scratch build (step 4a) ──────────────────────────────────────────
     # Registered explicitly like every domain namespace: src/Build/ is
     # excluded above for the typed request objects and the result, which are

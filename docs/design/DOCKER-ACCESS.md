@@ -243,6 +243,38 @@ own reference grammar is `[a-z0-9]+(?:[._-][a-z0-9]+)*` — separators must sit
 reference format"). The broker enforces the grammar the daemon actually
 accepts, so a bad tag is the caller's `422` rather than the daemon's `502`.
 
+**The session half, landed 2026-10-13 — and the shape it settled into.** The
+lines above sketched `GET /v1/sessions/{name} → {session, containers, ledger}`
+and `DELETE … {keep_workspace?}`; the implementation kept both and pinned four
+things the sketch left open:
+
+- **The ledger read is a disposable container, like its write.** The ledger
+  lives *inside* the workspace volume (PLAN.md §6.2), so the broker has no
+  mount of it; `SessionLedger` reads it the way `LedgerWriter` writes it — a
+  tiny container with the workspace mounted, same constraints, same image.
+  Today's file is read inline, the days present are listed by name, and a
+  read that cannot happen is `null` rather than a 5xx: the containers are
+  real whether or not a convenience read is legible.
+- **`keep_workspace` is all-or-none.** Volumes are kept or removed together
+  — a finer split (keep the workspace, drop stack data) would hide
+  irreversible deletion behind a flag whose name reads as preservation. The
+  order is a dependency order, not a preference: containers first (with `v=1`
+  so anonymous volumes go too), then the network (the daemon refuses one with
+  attached endpoints), then the session's other volumes, and the workspace
+  **last**, so every step that could refuse gets its chance before the one
+  irreversible step.
+- **`DELETE` of a missing session is `404`, not a success.** "Ensure" is a
+  `POST` idea; a deletion reporting triumph for a name that never existed
+  would teach the caller the wrong thing about its own state.
+- **One refusing resource does not strand the rest.** Failures are collected
+  in a `200` report — the shape `down` established — with the daemon's own
+  words per name. A session that never made a network reports none removed,
+  because networks are created lazily.
+
+Membership on every one of these endpoints is the `ww.session` label, never
+an id and never a name prefix — the same rule §4 states and the janitor
+already follows.
+
 There is deliberately no `mount`, `privileged`, `cap_add`, `user`, `entrypoint`,
 `hostname`, `label` or `name`-beyond-the-tag. `network: session` is the only thing
 that grants any reach, and it points at a network the broker created and named.

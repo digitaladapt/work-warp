@@ -8,6 +8,57 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The session surface — the rest of §5's session half.** Four endpoints
+  beside the create, all in `src/Session/SessionController.php`:
+
+  - `GET /v1/sessions` — every session, discovered from the volumes carrying
+    `ww.kind=workspace` plus a parseable `ww.session`. The label is the
+    authority; a name prefix is what a caller *could* type, and this code
+    never reads one. Stack volumes and unlabelled volumes share the listing
+    and are skipped.
+  - `GET /v1/sessions/{name}` — one session: `{session, workspace,
+    containers, ledger}`. Containers are label-filtered and sorted by name;
+    the ledger is today's file plus the days present.
+  - `GET /v1/sessions/{name}/ps` — the containers alone — what `ww-run ps`
+    printed, minus the table.
+  - `DELETE /v1/sessions/{name}` — destruction. The body is optional;
+    `{"keep_workspace": true}` keeps every volume.
+
+  **The ledger read is a disposable container, like the write.** It lives
+  inside the workspace volume, so `SessionLedger` reads it exactly the way
+  the janitor writes to it — a tiny container with the workspace mounted,
+  the same constraints and the same image as any command. There is no second
+  read path and no privileged exception for "just reading". The read is
+  best-effort: a ledger that cannot be read is `null` in an otherwise true
+  answer, never a 5xx.
+
+  **The deletion has one rule, stated once.** Containers and the network are
+  always removed; volumes are all-or-none under `keep_workspace`. A finer
+  split (keep the workspace, drop the stack's data) was considered and
+  rejected: it would put irreversible deletion behind a flag whose name
+  reads as preservation. The order is a dependency order — containers first
+  (a network with attached endpoints is refused, a mounted volume is
+  refused), with `v=1` so anonymous volumes go too; then the network; then
+  the session's other volumes; then the workspace, **last**, so every step
+  that could refuse has had its chance. One refusing container is a
+  reported failure in a `200`, not a stranded teardown — the same shape the
+  stack's `down` established.
+
+  `DELETE` of a missing session is a `404`, deliberately: "ensure" is a POST
+  idea, and a deletion that reports triumph for a name that never existed
+  teaches the caller the wrong thing about its own state. A session that
+  never made a network (they are created lazily) reports none removed.
+
+  **The Docker seam grew one method** — `removeNetwork`, the pair of
+  `createNetwork` that `exec` and `build` had already made necessary in
+  reverse. It forwards through the deployed proxy unchanged (`NETWORKS: 1`
+  covers the section; v0.5.0 does not gate on method — measured 2026-10-07).
+
+  Tests: `SessionDestroyerTest` pins the order, the membership rule and the
+  all-or-none rule through the scripted daemon's call log;
+  `SessionSurfaceApiTest` runs all four endpoints through the real kernel
+  and gate. Full suite **358 tests / 1064 assertions**.
+
 - **The compose harness — step 4b (DOCKER-ACCESS.md §10).**
   `POST /v1/sessions/{name}/stack` — one endpoint, three actions
   (`up`/`down`/`logs`), bringing a real multi-service stack up, down and into
