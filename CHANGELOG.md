@@ -361,6 +361,39 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The broker image could not boot — it had no dotenv file and the runtime
+  demanded one.** Found in the 2026-10-12 `develop` build's own log: the
+  build-stage smoke died with `PathException: Unable to read "/app/.env"`,
+  and a trailing `|| true` kept it from failing the build. The published
+  image therefore could not start: `.dockerignore` excludes every dotenv file
+  (configuration comes from the environment, §8.12), the Symfony runtime
+  reads `/app/.env` unconditionally unless told not to, and the entrypoint's
+  `set -e` warmup turned that into an exited container within a second of
+  start. Three changes, each verified by the boot matrix below:
+
+  - `ENV APP_RUNTIME_OPTIONS='{"disable_dotenv":true}'` in the runtime stage
+    (and on the build-stage smoke), the same line task-loom's images carry.
+    Both of this image's SAPIs see it: the CLI merges the environment into
+    `$_SERVER`, and FrankenPHP exposes it there by contract — verified by
+    running the image's own FrankenPHP version (v1.13.0, PHP 8.5.11) in a
+    container-shaped boot and reading `$_SERVER`/`$_ENV` in a served script.
+  - `env(DEFAULT_URI): 'http://localhost'` as a `services.yaml` parameter
+    default — the second, quieter half: with dotenv off, the compile step
+    stopped on `Environment variable not found: "DEFAULT_URI"`, which
+    `routing.yaml` reads with no fallback. Same pattern as penny-track and
+    vital-pulse.
+  - The smoke's `|| true` is gone. It was written to smoke-test the
+    autoloader and config compile and could never fail at either — it is
+    exactly how this shipped. `BrokerImageTest` now holds all three: the
+    switch is set, no smoke line can swallow its exit code, and the boot
+    actually succeeds in a subprocess with dotenv disabled and no `.env`
+    reachable.
+
+  The boot matrix, run against a checkout with `.env` moved aside (a fresh
+  image's shape): dotenv on, no file → `PathException` (rc 255); dotenv off →
+  `DEFAULT_URI` missing (rc 1); dotenv off with the parameter default and
+  `APP_SECRET` supplied → **cache warmed, rc 0**.
+
 - **The command image's default `HOME` now points somewhere writable.** The
   smoke test caught it: "the image must not set HOME" was only half a rule,
   because the runtime sets one anyway. runc derives `HOME` from the

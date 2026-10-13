@@ -39,9 +39,14 @@ COPY . .
 RUN composer dump-autoload --classmap-authoritative --no-dev \
     && rm -rf var/cache/* var/log/*
 
-# Build-time smoke of the autoloader and config compile. The placeholder
-# secrets are build-only; the real ones are injected at runtime (§8.12).
-RUN APP_ENV=prod APP_SECRET=build-secret WW_DOCKER_HOST= bin/console cache:warmup || true \
+# Build-time smoke of the autoloader and config compile — and it must be able
+# to fail, or it is decoration: a trailing `|| true` used to swallow every
+# failure it was written to catch, including this one. The image ships no
+# `.env`, so the boot needs the same APP_RUNTIME_OPTIONS the runtime stage
+# sets below; without it this RUN dies with `PathException: Unable to read
+# "/app/.env"`. The placeholder secrets are build-only; the real ones are
+# injected at runtime (§8.12).
+RUN APP_ENV=prod APP_SECRET=build-secret APP_RUNTIME_OPTIONS='{"disable_dotenv":true}' WW_DOCKER_HOST= bin/console cache:warmup \
     && rm -rf var/cache/*
 
 # ── Stage: app — the runtime image ────────────────────────────────────────
@@ -78,6 +83,14 @@ USER app
 
 ENV APP_ENV=prod
 ENV SERVER_NAME=:80
+
+# `.dockerignore` excludes every dotenv file: configuration comes from the
+# environment, never the image. Left to itself the runtime reads `/app/.env`
+# unconditionally and dies on it (PathException) — the entrypoint's warmup
+# first, and `set -e` makes that fatal. This is the same line the family's
+# images carry; both SAPIs here see the environment (the CLI merges it into
+# $_SERVER, and FrankenPHP exposes it there by contract).
+ENV APP_RUNTIME_OPTIONS='{"disable_dotenv":true}'
 
 EXPOSE 80
 

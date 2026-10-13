@@ -5,6 +5,14 @@
 parameters:
     env(LOG_LEVEL): 'info'
     env(LOCK_DSN): 'flock'
+
+    # The URL generator's URI for non-HTTP contexts. A parameter default
+    # rather than a deployment requirement, because `routing.yaml` reads it
+    # with no fallback and the compile step resolves it — and this image
+    # carries no `.env` (by design), so there is nothing else for it to come
+    # from at boot. Same pattern as penny-track and vital-pulse; a deployment
+    # that wants a different value can still set one.
+    env(DEFAULT_URI): 'http://localhost'
     env(WW_DOCKER_HOST): ''
     env(WW_TOKEN): ''
     env(WW_IMAGE): 'digitaladapt/work-warp:latest-base'
