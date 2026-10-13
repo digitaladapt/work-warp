@@ -139,11 +139,20 @@ What exists today:
   on `started` / `completed` / `healthy`, resolved before anything is created;
   `up` holds a slot, `down`/`logs` never do; images are pulled when absent
   (permissions the deployment already grants — no proxy change needed).
+- **The session surface** (`src/Session/`) — the rest of §5's session half:
+  `GET /v1/sessions` lists every session from the workspace *label* (never a
+  name prefix), `GET /v1/sessions/{name}` is one session's workspace,
+  containers and ledger, `GET /v1/sessions/{name}/ps` is the containers
+  alone, and `DELETE /v1/sessions/{name}` destroys the session in a
+  dependency order — containers (with their anonymous volumes), then the
+  network, then its volumes, the workspace last. `{"keep_workspace": true}`
+  keeps every volume; the default leaves nothing. One refusing container is
+  a reported failure, never a stranded teardown.
 
-What does not exist yet: `ps` and `GET`/`DELETE` for sessions, `stdin`
-delivery for `exec` (needs connection hijacking — currently a `501`), and the
-MCP surface. See DOCKER-ACCESS.md §10 for the build order; `ww-base/README.md`
-records the command image's contract and how to check it.
+What does not exist yet: `stdin` delivery for `exec` (needs connection
+hijacking — currently a `501`) and the MCP surface. See DOCKER-ACCESS.md §10
+for the build order; `ww-base/README.md` records the command image's contract
+and how to check it.
 
 ## Development
 

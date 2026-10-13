@@ -124,6 +124,20 @@ interface DockerApi
     public function createNetwork(string $name, array $labels): void;
 
     /**
+     * `DELETE /networks/{name}`. Tolerates `404`: "gone" was the goal, and a
+     * session teardown that raced another cleaner must not read that as a
+     * failure.
+     *
+     * A network with attached endpoints is refused by the daemon, which is a
+     * real refusal and leaves as one — the caller's order is wrong (containers
+     * first, network after), and this client does not guess at a retry.
+     *
+     * Through the socket proxy this forwards today: v0.5.0 does not gate on
+     * method, and `NETWORKS: 1` covers the section (measured 2026-10-07).
+     */
+    public function removeNetwork(string $name): void;
+
+    /**
      * `POST /volumes/create`. Creating a volume that already exists is a no-op
      * at the daemon, and is not an error here either.
      *

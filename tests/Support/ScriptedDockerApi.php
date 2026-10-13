@@ -338,6 +338,14 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('removeContainer');
 
         unset($this->containers[$id]);
+
+        // A removed container is gone from listings too — the daemon's own
+        // behaviour, and what lets a test assert that a deletion left nothing
+        // behind rather than only that the call was made.
+        $this->listed = array_values(array_filter(
+            $this->listed,
+            static fn (ContainerSummary $container): bool => $container->id !== $id,
+        ));
     }
 
     #[Override]
@@ -416,6 +424,17 @@ final class ScriptedDockerApi implements DockerApi
         $this->maybeFail('createNetwork');
 
         $this->networks[$name] = $labels;
+    }
+
+    #[Override]
+    public function removeNetwork(string $name): void
+    {
+        $this->record('removeNetwork', ['name' => $name]);
+        $this->maybeFail('removeNetwork');
+
+        // Tolerated by the interface: removing a network that is already gone
+        // reaches the desired end state.
+        unset($this->networks[$name]);
     }
 
     public function hasNetwork(string $name): bool
