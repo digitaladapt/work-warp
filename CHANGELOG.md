@@ -8,6 +8,57 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`bin/probe-broker.sh` — the broker measured, not described.** The proxy has
+  had `probe-guardrails.sh` since the first rollout, on the principle that a
+  claim about a running stack should be re-measured rather than trusted; the
+  broker had nothing, and the applied rollout immediately showed why it needed
+  something. Run on the host, it answers in one pass: is the container up, does
+  the terminal share a network with it, does the name `deploy/README.md` tells
+  clients to use actually resolve, does `/v1` refuse a caller with no token and
+  answer one with it, and — the check that has no other symptom — does the
+  running image carry `pcntl`. It prints a verdict and exits 0/1/2, with 2
+  meaning "some check could not be made", which is deliberately not a pass.
+
+- **The extensions the broker needs at run time, and the test that keeps them.**
+  `Dockerfile` installs `pcntl` and `intl` in the runtime stage; `BrokerImageTest`
+  asserts they are there, that the stage which runs composer is *not* the stage
+  that installs them, and that the janitor still subscribes to signals. See
+  "Fixed" below for the failure that made this worth a guard.
+
+### Fixed (the running stack, 2026-10-14)
+
+- **The sweep would have died silently in the published image, for want of one
+  extension.** `ww:janitor` implements `SignalableCommandInterface`, so the loop
+  cannot start without `pcntl` — Symfony's `Application::getSignalRegistry()`
+  throws "Signals are not supported" — and nothing in the repository required
+  the extension, so no build would have failed over it. The entrypoint runs the
+  loop in a `while true` + `sleep 5` subshell, which turned that into a failure
+  with no visible symptom: the command died at start, the subshell slept, and it
+  died again, every five seconds, while the broker answered `/health` and
+  `/v1/pkg` normally. The only thing that stopped was the TTL sweep — the
+  backstop under every command container, and the thing that makes "cannot sit
+  there forever" true when the broker is dead. Found while reconciling the
+  rollout record after the broker came up on 2026-10-14, having been added by
+  hand on the host to get it running; reproduced by running the loop with the
+  `pcntl_*` functions disabled, and confirmed working with the extension
+  present.
+
+- **`deploy/README.md` described a broker nothing could reach.** The rollout
+  section claimed `lyra-broker` and the terminal shared `lyra_api`; measured
+  2026-10-14, `lyra-broker` does not resolve from inside `lyra-terminal` at all
+  (`lyra-terminal` does, so the terminal's own network DNS is answering — the
+  broker is simply on none of its networks). Clients configured with the name
+  the document gives them fail with a name-resolution error, which reads as a
+  broken broker rather than a wrong name. The document now records this, along
+  with the two facts that follow from it (nothing on the LAN serves `:8300`, and
+  the SSH-pipe route needs the name to resolve where sshd runs), and names the
+  check that settles the cause — a second compose project puts the broker on its
+  own `<project>_api` bridge. The rollout heading says "applied" rather than
+  "staged", and the two curl steps in the client section now carry the bearer
+  header on the handshake as well as on the call.
+
+### Added (continued)
+
 - **The MCP surface, and the package around it — step 5 (DOCKER-ACCESS.md §10).**
   `src/Mcp/`, built over the settled broker API as the design required, using
   the official `mcp/sdk` (0.8.1) exactly as ContextShuttle does — which is the

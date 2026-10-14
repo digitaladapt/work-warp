@@ -8,6 +8,7 @@ does with it.
 | `compose.yaml` | The host stack as rolled out on 2026-10-07, reconciled with the host's working copy on 2026-10-08. It mirrors what is running; it is no longer a proposal to diff. |
 | `../bin/ww-run` | The sanctioned way to use Docker. Refuses the dangerous flags. |
 | `../bin/probe-guardrails.sh` | Measures what the proxy actually admits. Run it before trusting the prose. Needs `curl`; its exit code is the verdict (0 clean, 1 escalation reached, 2 results unknown). |
+| `../bin/probe-broker.sh` | Measures the broker as it is running — is it up, does the terminal share a network with it, does the name in this document resolve, does `/v1` refuse an unauthenticated caller, and does the running image carry `pcntl`. Run it **on the host** (it needs the daemon) before blaming a client. Same exit-code convention. |
 
 ---
 
@@ -231,12 +232,63 @@ editing the file to match reality is cheaper than renaming a live network.
 
 ---
 
-## Rollout: the broker — **staged 2026-10-13, not yet applied**
+## Rollout: the broker — **applied 2026-10-14**
 
-`compose.yaml` now carries a fourth service, `lyra-broker`. It is **staged, not
-rolled out**: this file mirrors the host's working copy, so the service is
-written here for review and applied on the host as a working-tree edit — the
-same shape the original rollout used. Until it is applied, nothing serves `/v1`.
+`compose.yaml` carries a fourth service, `lyra-broker`. It was **staged here on
+2026-10-13 and applied on the host on 2026-10-14**, as a working-tree edit — the
+same shape the original rollout used. The broker is up and serving: `/v1/pkg`
+answers with the token, and the proxy is running behind it. One dependency had
+to be added to the image by hand on the host; it is in `Dockerfile` now, and the
+reason is in "The extensions the broker does not declare" below.
+
+### What the applied rollout left open — measured 2026-10-14
+
+Four observations taken after the broker came up. The first is a correction to
+this document and the one to act on — until it is fixed, nothing reaches the
+broker; the second is the check §10c step 3 was written to make; the third and
+fourth are new.
+
+- **`lyra-broker` does not resolve from `lyra-terminal`.** `getent hosts
+  lyra-broker` answers nothing, while `getent hosts lyra-terminal` answers
+  `172.27.0.2` — so the terminal *is* on a network whose embedded DNS knows the
+  names on it, and the broker is on none of those networks. This is worth
+  recording precisely because of how it fails: a name-resolution error, not the
+  `401` the client section below warns about, so it reads as "broken broker"
+  rather than "wrong name". It also means the network table above describes the
+  *intent* rather than the running stack — callers do not currently reach the
+  broker's API at all.
+
+  The cause is not settled, and it cannot be settled from inside the terminal:
+  it needs the daemon. `bin/probe-broker.sh` runs the check (and everything
+  below); by hand it is one line:
+
+  ```bash
+  docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
+    lyra-broker lyra-terminal
+  ```
+
+  The likely cause is a second compose project. The bridge is named
+  `<project>_api`, so a broker started by a project other than this one joins
+  `lyra-broker_api` (its own project's bridge) rather than `lyra_api` — and
+  Docker's embedded DNS resolves a name only within a network. Two keys that do
+  not match is the same symptom as two networks that do not overlap.
+
+- **`lyra-dockerproxy` does not resolve from the terminal** — as designed, and
+  the pair is the point: the terminal cannot reach the proxy, and is supposed to
+  reach the broker. Today it can reach neither, so the broker is not yet the
+  path to Docker it was built to be.
+
+- **Nothing on the LAN answers `:8300`.** `lyra-broker` has no published port
+  and on this host neither the host's `:80` nor `192.168.4.98:8300` serves
+  `/v1/pkg`. Two consequences for the client section below: an MCP client
+  outside the stack cannot reach the broker yet, and route 2 there (the SSH
+  pipe) only works if the name resolves *where sshd runs* — which, on this host,
+  it does not. `ssh -N -L 8300:lyra-broker:80 andrew@host` needs the container's
+  address instead, or an sshd running inside the stack.
+
+- **The image needed an extension, and the failure it prevents is silent.** See
+  the subsection below; it is the reason `bin/probe-broker.sh` checks `php -m`
+  inside the running container rather than trusting the tag.
 
 ### Why it is the only new container that joins two networks
 
@@ -347,7 +399,17 @@ Both are read at the terminal's start, so it needs a restart to pick them up.
 **A client outside the stack (an MCP client on your machine).** The broker has no
 published port, and that is deliberate — it is reachable from the networks it is
 on, not from the host. Two ways to get to it, and the second is the one that does
-not change the deployment:
+not change the deployment.
+
+> Measured 2026-10-14: **neither route works on this host yet**, and for two
+different reasons. Route 1 was never taken (no `:8300` answers anywhere,
+including `192.168.4.98`), so the named-target form of route 2 fails too —
+`ssh -N -L 8300:lyra-broker:80 andrew@host` needs `lyra-broker` to resolve
+*where sshd runs*, and it does not resolve from the host either. Use the
+container's address, or an sshd inside the stack, until the network question in
+the rollout section is settled. Both routes fail for the same underlying
+reason, and the first fix is the same for both: make the broker reachable from
+the network the callers are on.
 
 1. **Publish a port** — add `ports: ['8300:80']` to `lyra-broker` and reach
    `http://localhost:8300/v1/mcp`. This *is* a deployment change: the broker's
@@ -377,27 +439,35 @@ a bearer header (Claude Desktop and most others take this shape — check yours)
 ```
 
 **How to tell it worked, in two calls, with no MCP client at all** — and this is
-the check to run before blaming a client:
+the check to run before blaming a client. Substitute `$BASE` for wherever the
+broker actually answers from — `http://localhost:8300` if you took route 1 above,
+`http://lyra-broker` from inside the stack. The `Authorization` header is
+required on **both** calls; the handshake is not exempt from the gate.
 
 ```bash
 TOKEN=<the same WW_TOKEN>
+BASE=http://localhost:8300
 
 # 1. The package: what this server is and how to call it.
-curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8300/v1/pkg | head -c 600
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/pkg" | head -c 600
 
 # 2. A real command, end to end. The MCP handshake is two requests: the first
 #    mints a session id, and the second carries it.
-SID=$(curl -sS -D- -o/dev/null -X POST http://localhost:8300/v1/mcp \
+SID=$(curl -sS -D- -o/dev/null -X POST "$BASE/v1/mcp" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
   | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
 
-curl -sS -X POST http://localhost:8300/v1/mcp \
+curl -sS -X POST "$BASE/v1/mcp" \
   -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"quick_command","arguments":{"session":"demo","cmd":["uname","-a"]}}}'
 ```
+
+If a client config uses the name in this document and gets a name-resolution
+error, that is the network finding in the rollout section, not a bad token —
+`bin/probe-broker.sh` tells the two apart in one run.
 
 That second call is **the whole system working**: the broker created a container
 from `:develop-base`, ran `uname -a` in it against the `demo` workspace, and
@@ -410,10 +480,48 @@ demo", that is the other half of the design talking — create the session first
 
 - `docker compose ps` shows `lyra-broker` up, on `api` and `backend`.
 - `docker logs lyra-broker` shows no `PathException` (the boot bug fixed in
-  PR #18) and, if `WW_DOCKER_HOST` is set, either sweeps or a single honest
-  warning about the host.
+  PR #18). Note that the compose service logs through the **syslog driver**, so
+  `docker logs` is empty when it is working as configured — the lines land in
+  the host's syslog under the `lyra-broker` tag (`journalctl -t lyra-broker`). An
+  empty `docker logs` is not evidence of a quiet broker.
 - The janitor is running as the broker's child — its log lines appear every
-  `WW_JANITOR_INTERVAL` seconds.
+  `WW_JANITOR_INTERVAL` seconds, in the host's syslog.
+- **The extension is actually in the running image**: `docker exec lyra-broker
+  php -m | grep -x pcntl`. This is not ceremony; see below for what its absence
+  looks like from outside, which is nothing at all.
+- `bin/probe-broker.sh` runs all of the above plus the network checks, from the
+  host, and prints a verdict rather than a wall of output.
+
+### The extensions the broker does not declare
+
+`Dockerfile` installs `pcntl` and `intl` in the runtime stage, and neither is in
+`composer.json`. The asymmetry is deliberate: the `deps` and `build` stages run
+composer without them, so a platform requirement would fail `composer install`
+in a stage that intentionally lacks the extension. `BrokerImageTest` asserts both
+halves of that — installed in the runtime stage, absent from the toolchain one.
+
+**pcntl is load-bearing, and its absence fails invisibly.** `ww:janitor`
+implements `SignalableCommandInterface`, so starting the sweep loop asks
+Symfony's `Application` for its `SignalRegistry`, and without pcntl that throws
+`Signals are not supported. Make sure that the "pcntl" extension is installed…`.
+The entrypoint runs the loop inside a `while true` + `sleep 5` subshell, so the
+failure is not a crash that stops the container: the command dies, the subshell
+sleeps, and it dies again — every five seconds, for the life of the container.
+The broker answers `/v1/pkg` and `/health` throughout, and the only thing that
+actually stops is the TTL sweep, which is the backstop under every command
+container. Reproduced 2026-10-14 by running the loop with the `pcntl_*`
+functions disabled (it dies at start) and again with them present (it sweeps).
+This is why the host had to add the extension by hand, and why it is now in the
+file rather than in a host's memory.
+
+**intl** was added alongside it on the same day with no failure recorded against
+it. It is kept because a missing extension here has the same shape as the pcntl
+case — nothing at build time, a run-time error in whichever request first needs
+it — and because the test now fails if either is dropped.
+
+Both are covered by `bin/probe-broker.sh`, which reads `php -m` from the running
+container: an image built before this change carries the broker and not the
+extension, and the two are indistinguishable from outside except by that check.
 
 ---
 

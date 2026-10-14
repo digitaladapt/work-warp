@@ -43,6 +43,74 @@ final class BrokerImageTest extends TestCase
         );
     }
 
+    /**
+     * The runtime stage must install the extensions the broker depends on at
+     * run time but does not declare in composer.json.
+     *
+     * `ww:janitor` implements `SignalableCommandInterface`, so the sweep loop
+     * cannot even start without pcntl: `Application::getSignalRegistry()`
+     * throws, and the entrypoint's `while true` + `sleep 5` subshell turns that
+     * one failure into an endless retry that nobody reads. The broker answers
+     * requests throughout, which is what makes it worth a test: the symptom is
+     * host volumes quietly never being reaped, not a container that is down.
+     *
+     * Re-verified 2026-10-14 by running `ww:janitor --every 5` with the pcntl_*
+     * functions disabled: it dies at start with the message below, and the same
+     * command runs with the extension present. `runtime` is the only stage that
+     * gets them; the deps/build stages run composer — and the build-stage boot
+     * smoke — without pcntl, which is why these are not in composer.json (a
+     * platform requirement would fail `composer install` in a stage that
+     * deliberately lacks the extension).
+     */
+    public function test_the_runtime_stage_installs_the_extensions_the_broker_needs_at_run_time(): void
+    {
+        $runtime = $this->runtimeStage();
+
+        foreach (['pcntl', 'intl'] as $extension) {
+            self::assertMatchesRegularExpression(
+                '/^\s*&&\s+install-php-extensions\b[^\n]*\b'.preg_quote($extension, '/').'\b/m',
+                $runtime,
+                \sprintf(
+                    'The runtime stage must install `%s`. It is not in composer.json (the deps/build stages run composer without it), so nothing else fails when it goes missing: %s',
+                    $extension,
+                    'pcntl' === $extension
+                        ? 'without pcntl the entrypoint\'s janitor loop dies at start with "Signals are not supported" and retries every five seconds forever, so the host is never swept and nothing reports it.'
+                        : 'without intl the failure would surface as a missing-class or missing-function error at run time, in whichever request or sweep first needed it.',
+                ),
+            );
+        }
+
+        // The premise of the check above: these are run-time-only, so the stage
+        // that runs composer must not be the stage that installs them.
+        self::assertStringNotContainsString(
+            'install-php-extensions',
+            $this->stage('deps'),
+            'The deps stage runs `composer install`; if it also installed these, they could have been declared as platform requirements instead and this test would be guarding the wrong thing.',
+        );
+    }
+
+    public function test_the_janitor_loop_needs_the_extension_this_image_installs(): void
+    {
+        // Tie the extension to the feature that needs it, so a future janitor
+        // that no longer subscribes to signals does not keep the extension by
+        // habit, and one that does cannot ship without it.
+        $command = $this->read('src/Janitor/JanitorCommand.php');
+
+        self::assertStringContainsString(
+            'SignalableCommandInterface',
+            $command,
+            'The janitor subscribes to SIGTERM/SIGINT through Symfony Console, which requires pcntl at run time. If that changed, the pcntl install in the runtime stage should be revisited.',
+        );
+
+        $entrypoint = $this->read('docker/entrypoint.sh');
+
+        self::assertStringContainsString(
+            'while true',
+            $entrypoint,
+            'The entrypoint restarts the janitor in a loop, which is what turns a missing pcntl into a silent, permanent failure rather than a visible crash — the reason the extension is asserted here.',
+        );
+    }
+
     public function test_the_build_stage_boot_smoke_can_fail(): void
     {
         $smokeLines = array_values(array_filter(
@@ -89,6 +157,23 @@ final class BrokerImageTest extends TestCase
             $output,
             'The entrypoint\'s exact warmup must succeed with dotenv disabled and no .env reachable — before the fix this died with PathException, and without the DEFAULT_URI parameter default it dies on routing.yaml. Output:'.\PHP_EOL.$output,
         );
+    }
+
+    /**
+     * The body of one `FROM ... AS <name>` stage, up to the next stage.
+     */
+    private function stage(string $name): string
+    {
+        if (1 !== preg_match('/^FROM\s+\S+\s+AS\s+'.preg_quote($name, '/').'\s*$(.*?)(?=^FROM\s|\z)/ms', $this->read('Dockerfile'), $matches)) {
+            throw new RuntimeException(\sprintf('the Dockerfile has no stage named "%s"; the boot contract is asserted against it by name.', $name));
+        }
+
+        return $matches[1];
+    }
+
+    private function runtimeStage(): string
+    {
+        return $this->stage('app');
     }
 
     /**
