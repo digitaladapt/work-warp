@@ -25,6 +25,13 @@ use Symfony\Component\HttpKernel\KernelEvents;
  * so an unauthenticated caller gets the same `401` for every `/v1` path and
  * cannot use the status codes to enumerate which routes exist.
  *
+ * Because it runs *before* routing, it has to decide for itself which requests
+ * belong to `/v1` — and it must decide the way the router would, or the two
+ * disagree and the gate is the one that loses. `Request::getPathInfo()` is the
+ * still-percent-encoded path; the router decodes before matching. Comparing the
+ * encoded form let `/v1%2fsessions` skip the gate entirely and reach the
+ * sessions controller with no token; see `path()`.
+ *
  * An unset or empty token refuses with `503` rather than allowing: the whole
  * point of this component is that only the broker holds the Docker credential,
  * and that claim is false the moment the broker accepts anonymous callers
@@ -65,7 +72,7 @@ final class BrokerTokenListener implements EventSubscriberInterface
         }
 
         $request = $event->getRequest();
-        $path = $request->getPathInfo();
+        $path = self::path($request);
 
         // Exactly `/v1` or something under `/v1/`: a bare `str_starts_with`
         // would also catch a future `/v10` and quietly gate a surface that has
@@ -95,6 +102,31 @@ final class BrokerTokenListener implements EventSubscriberInterface
                 'a bearer token is required for /v1 requests',
             ));
         }
+    }
+
+    /**
+     * The path this request will be *routed* by, which is not the path it
+     * arrived as.
+     *
+     * `Request::getPathInfo()` keeps percent-encoding — `/v1%2fsessions` comes
+     * back verbatim — while `UrlMatcher::match()` decodes with `rawurldecode()`
+     * before it matches. So the encoded form is a `/v1` request to the router
+     * and was invisible to this gate: `/v1%2fsessions` and `/%76%31/sessions`
+     * both reached the sessions controller unauthenticated. Decoding here, with
+     * the same function the router uses, is what keeps the two from disagreeing.
+     *
+     * Exactly one decode, because the router does exactly one: `/v1%252fsessions`
+     * decodes to a path that is not under `/v1`, and the router agrees, so
+     * neither treats it as a `/v1` request. Decoding in a loop would gate paths
+     * the router cannot reach anyway.
+     *
+     * Decoding can only ever *widen* what is gated, never narrow it: a path
+     * whose decoded form is not under `/v1` is one the router — decoding the
+     * same way — cannot match to a `/v1` route.
+     */
+    private static function path(Request $request): string
+    {
+        return rawurldecode($request->getPathInfo());
     }
 
     /**

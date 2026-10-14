@@ -6,6 +6,24 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **The bearer gate stepped aside for a percent-encoded path, so `/v1` was
+  reachable without the token.** The gate compares `Request::getPathInfo()`,
+  which is the *still-encoded* path, while the router decodes before matching
+  (`UrlMatcher::match()` runs `rawurldecode()`). Encoding one character
+  therefore made a request look like a non-`/v1` request to the gate and like a
+  `/v1` request to the router: `GET /v1%2fsessions` and `GET /%76%31/sessions`
+  listed sessions, `POST /v1%2fsessions` created one, and `POST /v1%2fmcp`
+  completed an MCP `initialize` and issued a session id — all with no
+  `Authorization` header, measured against the reference deployment on
+  `warp.devgnome.com`. The gate now decodes with the same function the router
+  uses, exactly once, so the two cannot disagree about what a `/v1` request is;
+  `/v1%252fsessions` stays a `404`, because a single decode leaves it outside
+  `/v1` and that is what routing says too. The unit and kernel-level gate tests
+  now cover the encoded forms, which the existing cases did not — every one of
+  them used a path that was already decoded.
+
 ### Added
 
 - **`bin/probe-broker.sh` — the broker measured, not described.** The proxy has
