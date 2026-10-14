@@ -14,8 +14,9 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   scratch build runs in a broker-launched container with the classic builder
   pinned — each of those was built and is asserted in tests, but §11 still
   presented them as open. They are now recorded as answers with the behaviour
-  that answers them. What is genuinely still open is the workspace volume's
-  **quota policy**: nothing stops a session filling the host filesystem today.
+  that answers them. The workspace volume's **quota policy** was the fifth, and
+  it is now answered too — see "Added (the workspace write cap)" below — so
+  §11 holds no undecided item that code does not already settle.
 
 ### Security
 
@@ -37,6 +38,61 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   blind spot and now measures `/v1%2fpkg` alongside `/v1/pkg`: it asked whether
   the gate covered `/v1` only in the spelling a client happens to use, so it
   would have reported the gate as working on a broker that was wide open.
+
+### Added (the workspace write cap, 2026-10-14)
+
+- **`WW_MAX_FILE_SIZE` — the workspace gets a limit, and it is the first one
+  aimed at the workspace rather than at the process.** `Memory` and `NanoCpus`
+  bound the process, `PidsLimit` bounds its forks, the root filesystem is
+  read-only and its only writable path is a 64 MiB tmpfs — and none of them
+  bound the workspace, because the workspace is a mount and a mount is the one
+  place writing is the point. A command that loops with a redirect in it, the
+  ordinary accident rather than an interesting attack, could fill the host until
+  something else on it stopped working.
+
+  A real byte-cap on a volume is a filesystem feature — XFS project quotas,
+  btrfs/zfs, devicemapper — and every one of them needs host state (`mkfs`, a
+  mount option, a pre-created backing file) that `docker compose up` cannot
+  supply. This broker is meant to come up on a stock Docker host, so the limit
+  is instead `RLIMIT_FSIZE`: one `HostConfig` field, no host setup, enforced by
+  the kernel against the writer. `App\Docker\FileSize` parses the configured
+  value (a whole number with an optional `k/m/g/t` suffix, or `unlimited`); the
+  default is **5 GiB**.
+
+  Four decisions worth naming, because each is a place a limit quietly stops
+  existing:
+
+  - **Soft equals hard.** A hard limit above the soft one would let a process
+    raise its own soft limit, and a command runs as `1000:1000` with every
+    capability dropped precisely so nothing inside the container can widen this.
+    `ContainerSpecTest` asserts the two match, since that is the load-bearing
+    half.
+  - **An empty value takes the default rather than removing the cap.** The two
+    mistakes are not symmetrical: 5 GiB when unlimited was meant is a loud
+    `EFBIG` naming the file; unlimited when the default was meant is a full disk
+    and no clue which command did it. The permissive reading does not win by
+    accident.
+  - **A typo is a broker that refuses to start**, not a first command that
+    quietly ran unbounded — parsed once at boot from a service factory, so `0`,
+    `1.5G` and `5x` fail the compile with the value named.
+  - **Command containers only.** A stack service's database growing past any
+    particular size is behaving correctly, so capping it would break the case
+    that surface exists for; and the build endpoint carries no `HostConfig` at
+    all. Choices, not oversights.
+
+  What it does **not** do is stated rather than glossed, and measured rather
+  than assumed: `truncate` and `fallocate` do not pass through `write()`, so `FileSize`
+  names them as escapes and `ww-base/smoke.sh` probes for them — behind a control
+  run first, so the check is the flag's doing and not the image's. It bounds a
+  *file*, not the volume (worst case 5 GiB x `pids_limit`, 512), which does not
+  cap the disk but does turn an overnight catastrophe into two numbers anyone can
+  read off a config file.
+
+  **Still open, and filed separately as #27:** volumes accumulate.
+  `POST /v1/sessions` creates `ww-ws-<session>` and nothing removes it — the
+  janitor deliberately will not, and `DELETE /v1/sessions` removes it only when
+  asked. A leak rather than a limit, and one with no symptom until a host is full
+  of workspaces nobody asked to keep.
 
 ### Added
 
