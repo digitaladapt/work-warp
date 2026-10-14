@@ -6,6 +6,17 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`PLAN.md` §11 no longer reads as five undecided questions when four of them
+  are already answered in code.** The janitor runs in the broker, the ledger
+  lives inside the workspace volume, `NetworkMode::None` is the default, and the
+  scratch build runs in a broker-launched container with the classic builder
+  pinned — each of those was built and is asserted in tests, but §11 still
+  presented them as open. They are now recorded as answers with the behaviour
+  that answers them. What is genuinely still open is the workspace volume's
+  **quota policy**: nothing stops a session filling the host filesystem today.
+
 ### Security
 
 - **The bearer gate stepped aside for a percent-encoded path, so `/v1` was

@@ -451,14 +451,43 @@ Three of these cannot be done from inside the sandbox and are blockers:
 
 ## 11. Open questions
 
-- Where does the workspace volume live, and what is its quota policy?
-- Does the workspace image build on the host (slower, no host toolchain
-  dependency but a build daemon per session) or in the command container
-  (faster, needs docker in the build)?
-- Does the janitor run as a host-side daemon, or as a sidecar in the broker?
-- Does the session record live in this repo's own store, or in MemoryDraft?
-- Should the ephemeral container be `--network none` for commands that do not
-  need the network, and only granted a netns when they do?
+**Reconciled 2026-10-14.** Four of the five had been answered by the build
+rather than by argument, and §12's build order has since landed in full, so they
+are recorded here as answers — each one describes behaviour the code already
+has — rather than left reading as undecided. What remains genuinely open is at
+the bottom.
+
+**Answered since, by the build:**
+
+- *Does the janitor run as a host-side daemon, or as a sidecar in the broker?* —
+  **In the broker.** `ww:janitor` is a console command of the broker image that
+  the entrypoint runs in a `while true` + `sleep 5` loop. That is why `pcntl`
+  became a **runtime** dependency and not merely a development one, and why
+  `bin/probe-broker.sh` checks for it: its absence has no symptom except a sweep
+  that quietly stops, while `/health` keeps answering.
+- *Does the session record live in this repo's own store, or in MemoryDraft?* —
+  **This repo's, and inside the workspace volume.** `LedgerWriter` writes the
+  ledger and `SessionLedger` reads it back in a disposable container, because
+  the broker holds no mount of the workspace: the volume is the one place a
+  session's record cannot outlive its workspace (§6.2).
+- *Should the ephemeral command container be `--network none` unless it needs a
+  netns?* — **Yes, and that is the default.** Granting one is an explicit
+  per-request `session`, and there is no value at all for `host` or for a
+  network by name: `NetworkMode` is the entire vocabulary (DOCKER-ACCESS.md §5).
+- *Does the workspace image build on the host, or in the command container?* —
+  **Neither, exactly.** The scratch build runs in an ephemeral *build* container
+  the broker launches itself (`POST /v1/sessions/{name}/build`), with the classic
+  builder pinned to `version=1` so that `network: session` is expressible —
+  BuildKit refuses a custom `networkmode`, measured. No host toolchain is
+  required, and the socket is never mounted into the build.
+
+**Still open:**
+
+- The workspace volume's **quota policy.** Where it lives is settled: a named
+  volume `ww-ws-<session>` on the daemon (`SessionName::workspaceVolume()`),
+  populated by the daemon's own volume step from the image's `1000:1000`
+  ownership of `/workspace`. What is undecided is what stops a session filling
+  the host filesystem, because nothing does today beyond the host itself.
 
 ---
 
