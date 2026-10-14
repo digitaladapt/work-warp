@@ -6,6 +6,7 @@ namespace App\Tests\Unit\Exec;
 
 use App\Docker\DockerRefused;
 use App\Docker\DockerUnavailable;
+use App\Docker\FileSize;
 use App\Docker\LogOutput;
 use App\Exec\ExecRequest;
 use App\Exec\ExecRunner;
@@ -253,6 +254,38 @@ final class ExecRunnerTest extends TestCase
     }
 
     /**
+     * The workspace cap is configuration, and it reaches the create payload.
+     * The value itself is asserted in `ContainerSpecTest` and `FileSizeTest`;
+     * what this holds is the wiring in between — that the runner hands its
+     * configured cap to the container it builds rather than falling back to a
+     * default of its own.
+     */
+    public function test_the_configured_file_size_cap_reaches_the_create_payload(): void
+    {
+        [$docker, , , $runner] = $this->mount(maxFileSize: FileSize::parse('123m'));
+        $docker->runToCompletion(0);
+
+        $runner->run(SessionName::from('demo'), ExecRequest::fromArray(['cmd' => ['true']]));
+
+        $create = null;
+
+        foreach ($docker->calls() as $call) {
+            if ('createContainer' === $call['method']) {
+                $create = $call['args'];
+            }
+        }
+
+        self::assertNotNull($create);
+
+        /** @var array<string, mixed> $hostConfig */
+        $hostConfig = $create['payload']['HostConfig'];
+        self::assertSame(
+            [['Name' => 'fsize', 'Soft' => 123 * 1024 ** 2, 'Hard' => 123 * 1024 ** 2]],
+            $hostConfig['Ulimits'],
+        );
+    }
+
+    /**
      * One test's small world: the scripted daemon, a fresh slot pool, the fake
      * clock, and a runner over all three. The session exists unless a test
      * says otherwise, so most tests are about the command rather than the
@@ -260,12 +293,20 @@ final class ExecRunnerTest extends TestCase
      *
      * @return array{ScriptedDockerApi, Slots, FakeClock, ExecRunner}
      */
-    private function mount(bool $createSession = true): array
+    private function mount(bool $createSession = true, ?FileSize $maxFileSize = null): array
     {
         $docker = new ScriptedDockerApi();
         $slots = Slots::of(2, new InMemoryStore());
         $clock = new FakeClock();
-        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
+        $runner = new ExecRunner(
+            $docker,
+            $slots,
+            new NullLogger(),
+            $clock,
+            'digitaladapt/work-warp:test-base',
+            300,
+            $maxFileSize ?? FileSize::default(),
+        );
 
         if ($createSession) {
             $docker->createVolume('ww-ws-demo', ['ww.session' => 'demo']);

@@ -19,6 +19,13 @@ parameters:
     env(WW_MAX_CONCURRENCY): '2'
     env(WW_TTL_GRACE): '300'
 
+    # The largest file a command may write, as `RLIMIT_FSIZE`. A string here
+    # because it carries a unit; `App\Docker\FileSize` parses it once, at boot,
+    # so a typo is a broker that refuses to start rather than a first command
+    # that quietly ran with no cap. `FileSize`'s docblock carries the whole
+    # argument, including the two things this does not cover.
+    env(WW_MAX_FILE_SIZE): '5G'
+
     # The name and version the MCP server reports as its own, and that the
     # package manifest publishes. Parameters rather than literals so a release
     # sets them in one place; the version is the running build's, not whatever
@@ -47,6 +54,12 @@ parameters:
     # Seconds added to a command's own timeout to form the ww.ttl label: the
     # backstop the janitor enforces when the broker did not reap its container.
     ttl_grace: '%env(int:WW_TTL_GRACE)%'
+
+    # The per-file write cap a command container is created with. Kept as the
+    # configured string here on purpose: a size carries a unit, and
+    # `FileSize::parse` is the one place that knows what the units are. The
+    # resolution to bytes happens in the service factory below.
+    max_file_size: '%env(WW_MAX_FILE_SIZE)%'
 
 services:
     _defaults:
@@ -112,6 +125,21 @@ services:
         arguments:
             $image: '%command_image%'
             $ttlGrace: '%ttl_grace%'
+            # Not the parameter itself: a size arrives as a string, and
+            # `FileSize::parse` is the one place that knows its units.
+            $maxFileSize: '@App\Docker\FileSize'
+
+    # Parsed once, at boot, from the configured size string — so an
+    # unparseable value is a compile failure naming the variable, rather than
+    # an exception on the first command of the first session.
+    App\Docker\FileSize:
+        # Public for the same reason `Slots` is: the wiring test fetches it by
+        # id to assert the cap came from configuration, and `public` costs
+        # nothing in the PHP service container.
+        public: true
+        factory: ['App\Docker\FileSize', 'parse']
+        arguments:
+            - '%max_file_size%'
 
     # The exec endpoint. A controller like any other: tagged so its action
     # arguments resolve from the request.

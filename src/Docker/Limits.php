@@ -38,6 +38,17 @@ final class Limits
         public readonly string $user = '1000:1000',
         public readonly array $tmpfs = ['/tmp' => 'rw,noexec,nosuid,size=64m'],
         /**
+         * `RLIMIT_FSIZE` in bytes, or null for no cap. Configuration, like
+         * `ttlGrace`, but defaulted here as well as in `config/services.yaml`,
+         * so a `Limits` built by hand in a test or by another surface gets the
+         * safe value rather than the permissive one.
+         *
+         * The one limit that bounds the *workspace*: everything else here
+         * bounds the process, and the workspace is a mount. `FileSize` carries
+         * the reasoning, including what this does not cover.
+         */
+        public readonly ?int $maxFileSizeBytes = FileSize::DEFAULT_BYTES,
+        /**
          * How many bytes of each stream (`stdout` and `stderr`) are kept. The
          * reader stops at the cap rather than draining and discarding, and
          * the result carries `truncated` so a partial log cannot be mistaken
@@ -54,5 +65,30 @@ final class Limits
     public static function defaults(): self
     {
         return new self();
+    }
+
+    /**
+     * The `Ulimits` array for `POST /containers/create`.
+     *
+     * Soft and hard set to the same value on purpose: a hard limit above the
+     * soft one would let a process raise its own soft limit up to it, and the
+     * point of setting this at all is that nothing inside the container can
+     * widen it. The keys are the string names the daemon expects (`fsize`),
+     * not the numeric constants — measured, since the two spellings differ
+     * between the API and the CLI.
+     *
+     * @return list<array{Name: string, Soft: int, Hard: int}>
+     */
+    public function ulimits(): array
+    {
+        if (null === $this->maxFileSizeBytes) {
+            return [];
+        }
+
+        return [[
+            'Name' => 'fsize',
+            'Soft' => $this->maxFileSizeBytes,
+            'Hard' => $this->maxFileSizeBytes,
+        ]];
     }
 }

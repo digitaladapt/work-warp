@@ -82,6 +82,7 @@ Every line is `ww-run`'s current list, plus the measured findings.
 | `--memory`, `--cpus` | The host also runs the calendar, the memory service and a dozen others. |
 | `--network none` (default) | Reaching anything is opt-in per command, with two allowed values. |
 | `--read-only` + `--tmpfs /tmp` | **New.** Nothing persists except the workspace mount. Removes "write to `/` and leave it". |
+| `--ulimit fsize` | **New.** The workspace is a mount, and a mount is the one place writing is the point — so this is the only limit in the list aimed at the workspace rather than at the process. Per file, per process; `App\Docker\FileSize` carries what it does and does not cover. |
 | exactly one `-v`: the session's volume at `/workspace` | The mount list is not a parameter. |
 | `--label ww.created-by=work-warp`, `ww.session`, `ww.ttl` | Ownership from a label, never from a typed name. |
 | name `ww-<session>-<id>` | The prefix is generated, not supplied. |

@@ -6,6 +6,7 @@ namespace App\Tests\Unit\Janitor;
 
 use App\Docker\DockerRefused;
 use App\Docker\DockerUnavailable;
+use App\Docker\FileSize;
 use App\Exec\ExecRunner;
 use App\Exec\Slots;
 use App\Janitor\Janitor;
@@ -153,7 +154,7 @@ final class JanitorCommandTest extends TestCase
 
         $clock = new SleepingClock();
 
-        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
+        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300, FileSize::default());
         $janitor = new Janitor($docker, new LedgerWriter($runner, new NullLogger(), $clock), new NullLogger(), $clock);
         $command = new JanitorCommand($janitor, new NullLogger(), $clock);
 
