@@ -86,9 +86,13 @@ final class ContainerSpec
                 // process. Everything above bounds what the command may
                 // consume; the workspace is a mount, and a mount is the one
                 // place writing is the point — so a redirect in a loop is
-                // bounded here instead (`FileSize`). Absent when the cap is
-                // configured off, because `Ulimits: []` and no key mean the
-                // same thing to the daemon and one of them is honest.
+                // bounded here instead (`FileSize`).
+                //
+                // The key is always present, like every key in this payload:
+                // the shape is closed, so an empty list is how "no cap" is
+                // said rather than by omitting the field. `[]` and an absent
+                // key mean the same thing to the daemon, and only one of them
+                // keeps the set of keys fixed.
                 'Ulimits' => $limits->ulimits(),
 
                 'Memory' => $limits->memoryBytes,
