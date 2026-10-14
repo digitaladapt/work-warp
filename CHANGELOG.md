@@ -22,7 +22,10 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   `/v1%252fsessions` stays a `404`, because a single decode leaves it outside
   `/v1` and that is what routing says too. The unit and kernel-level gate tests
   now cover the encoded forms, which the existing cases did not — every one of
-  them used a path that was already decoded.
+  them used a path that was already decoded. `bin/probe-broker.sh` has the same
+  blind spot and now measures `/v1%2fpkg` alongside `/v1/pkg`: it asked whether
+  the gate covered `/v1` only in the spelling a client happens to use, so it
+  would have reported the gate as working on a broker that was wide open.
 
 ### Added
 
