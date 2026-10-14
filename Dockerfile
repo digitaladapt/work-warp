@@ -56,6 +56,7 @@ FROM dunglas/frankenphp:1-php8.5-trixie AS app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl \
+    && install-php-extensions pcntl intl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/php.ini /usr/local/etc/php/conf.d/app.ini
