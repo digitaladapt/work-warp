@@ -29,6 +29,20 @@ composer lint && composer stan && composer test
 All of these must pass, plus `composer audit`, before a PR is mergeable.
 Coverage is measured in CI (pcov) against a floor that only rises.
 
+### A note on PHP extensions
+
+Two extensions the broker needs at run time are **not** in `composer.json`, on
+purpose: `pcntl` (the janitor's signal handling) and `intl` are installed in the
+image's runtime stage only, while the `deps` and `build` stages run composer
+without them. A platform requirement would fail `composer install` there, in a
+stage that deliberately lacks the extension. `BrokerImageTest` asserts both
+halves. The trap is the failure mode: neither is caught at build time, and the
+pcntl one is not caught at run time either — the janitor dies at start inside the
+entrypoint's restart loop and retries forever while the broker answers normally,
+so the host simply stops being swept. If you add a package that needs an
+extension, decide which stage needs it and say so in the Dockerfile; a green
+build is not evidence that it is there.
+
 The PHP toolchain is not in the base image; `~/install-php85.sh` restores it
 after a container rebuild and is safe to re-run.
 

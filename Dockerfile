@@ -53,6 +53,32 @@ RUN APP_ENV=prod APP_SECRET=build-secret APP_RUNTIME_OPTIONS='{"disable_dotenv":
 FROM dunglas/frankenphp:1-php8.5-trixie AS app
 
 # ca-certificates (TLS to the proxy or a registry) and curl (HEALTHCHECK).
+#
+# The two PHP extensions are here because their absence is not a build error —
+# nothing in composer.json requires them — but a runtime failure in a process
+# nobody is watching. In particular:
+#
+#   pcntl  ww:janitor implements SignalableCommandInterface, so starting the
+#          sweep loop asks Symfony\Component\Console\Application for its
+#          SignalRegistry, and getSignalRegistry() throws "Signals are not
+#          supported. Make sure that the "pcntl" extension is installed..."
+#          when pcntl is missing. The entrypoint starts that loop inside a
+#          `while true` + `sleep 5` subshell, so the failure is not a crash: the
+#          command dies, the subshell sleeps, and it dies again — every five
+#          seconds, forever, while the broker itself looks up and answers
+#          /v1/pkg. The host simply stops being swept, and the TTL backstop
+#          under every command container stops with it. Verified 2026-10-14 by
+#          running the loop with the pcntl_* functions disabled and watching it
+#          die at start; the same run succeeds with the extension present.
+#   intl   Added alongside pcntl on 2026-10-14 with no failure recorded against
+#          it; kept because a missing extension here has the same shape as the
+#          pcntl case, and BrokerImageTest now fails if either is dropped.
+#
+# Both are installed only in this stage: the deps/build stages run composer
+# without them (verified — the build-stage boot smoke passes with pcntl's
+# functions disabled). Declaring either in composer.json would change that: the
+# platform check would then fail the install in `deps`, which carries neither
+# extension, so such a declaration has to move them into the deps stage too.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl \

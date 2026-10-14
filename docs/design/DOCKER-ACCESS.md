@@ -839,6 +839,16 @@ past its TTL therefore has no live consumer by construction. Kills are written
 to the session's ledger through the same disposable-container path a command
 uses.
 
+One run-time dependency came out of the rollout, and it is worth recording here
+because the design text above makes it easy to miss: `ww:janitor` implements
+`SignalableCommandInterface`, so the loop cannot start without **pcntl**, and
+nothing in this repository would have failed a build over its absence. The image
+is where it is now installed (see `deploy/README.md`, "The extensions the broker
+does not declare"); the entrypoint's `while true` + `sleep 5` restart loop is
+what made the failure silent — the janitor died at start, every five seconds,
+while the broker answered requests normally and the host was never swept. A
+"process is already long-lived" (above) is only true if the process starts.
+
 **Step 4 — `build` (scratch), then the compose harness.** A real
 `docker compose up` test against a real stack. `PLAN.md` §9's task-loom e2e
 becomes a normal operation.
