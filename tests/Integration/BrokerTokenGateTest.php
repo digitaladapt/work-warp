@@ -111,6 +111,85 @@ final class BrokerTokenGateTest extends WebTestCase
         self::assertSame(Response::HTTP_NOT_FOUND, $client->getResponse()->getStatusCode());
     }
 
+    /**
+     * Percent-encoding must not be a way around the gate.
+     *
+     * `Request::getPathInfo()` is the *still-encoded* path; the router decodes
+     * before it matches (`UrlMatcher::match()` runs `rawurldecode()`). A gate
+     * that compares the encoded form therefore steps aside for
+     * `/v1%2fsessions` while the router hands the same request to the sessions
+     * controller, and the token is never asked for. Every path here is a `/v1`
+     * request as far as routing is concerned.
+     */
+    #[DataProvider('encodedV1Paths')]
+    public function test_a_percent_encoded_v1_path_is_gated(string $path): void
+    {
+        $client = self::createClient();
+        $docker = self::getContainer()->get(ScriptedDockerApi::class);
+        self::assertInstanceOf(ScriptedDockerApi::class, $docker);
+
+        $client->request('POST', $path, [], [], ['CONTENT_TYPE' => 'application/json'], '{"name":"refactor"}');
+
+        self::assertSame(
+            Response::HTTP_UNAUTHORIZED,
+            $client->getResponse()->getStatusCode(),
+            $path.' is a /v1 request once the router decodes it, so it must be gated',
+        );
+        self::assertSame([], $docker->calledMethods(), 'an unauthenticated request must not reach the controller');
+    }
+
+    /**
+     * Gated, not rejected: with the token the encoded form still resolves to the
+     * route the router decodes it into, so a client that encodes its paths is
+     * not broken by the fix.
+     */
+    public function test_a_percent_encoded_v1_path_still_works_with_the_token(): void
+    {
+        $client = self::createClient();
+
+        $this->authorized($client, 'GET', '/v1%2fsessions');
+
+        self::assertSame(Response::HTTP_OK, $client->getResponse()->getStatusCode());
+    }
+
+    /**
+     * An encoding of an open path stays open: decoding must not over-gate.
+     */
+    public function test_an_encoding_of_a_public_path_is_not_gated(): void
+    {
+        $client = self::createClient();
+
+        $client->request('GET', '/%68ealth');
+
+        self::assertSame(Response::HTTP_OK, $client->getResponse()->getStatusCode(), '/health is open however it is spelled');
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function encodedV1Paths(): iterable
+    {
+        yield 'encoded slash' => ['/v1%2fsessions'];
+        yield 'uppercase encoded slash' => ['/v1%2Fsessions'];
+        yield 'encoded v' => ['/%76%31/sessions'];
+        yield 'encoded prefix and slash' => ['/%76%31%2Fsessions'];
+    }
+
+    /**
+     * The gate decodes exactly as often as the router does — once. A
+     * double-encoded path decodes to something the router cannot match to a
+     * `/v1` route, so it is a 404 rather than a 401: the gate must agree with
+     * routing, not be more suspicious than it.
+     */
+    public function test_a_double_encoded_path_is_a_404_like_the_router_says(): void
+    {
+        $client = self::createClient();
+
+        $client->request('POST', '/v1%252fsessions', [], [], ['CONTENT_TYPE' => 'application/json'], '{"name":"refactor"}');
+
+        self::assertSame(Response::HTTP_NOT_FOUND, $client->getResponse()->getStatusCode());
+    }
+
     private function authorized(KernelBrowser $client, string $method, string $path, string $header = 'Bearer test-token'): void
     {
         $client->request($method, $path, [], [], ['HTTP_AUTHORIZATION' => $header]);

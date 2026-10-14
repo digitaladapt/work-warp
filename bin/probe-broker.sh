@@ -174,6 +174,23 @@ else
       *)           bad "/v1/pkg returned $NO_TOKEN with no token (000 = nothing answered)" ;;
     esac
 
+    # The same request with one slash percent-encoded, because the plain spelling
+    # above proves less than it looks like it proves. The gate reads
+    # `Request::getPathInfo()`, which keeps the encoding; the router decodes
+    # before matching (`UrlMatcher::match()`). On 2026-10-14 those two disagreed,
+    # and every check in this file still passed while `/v1%2fsessions` listed
+    # sessions and `POST /v1%2fmcp` was unauthenticated remote execution. A gate
+    # claim has to be measured in the form that bypasses it, not the form a
+    # client happens to use. `--path-as-is` because the encoding is the point.
+    ENCODED="$(docker run --rm --network "$net" "$PROBE_IMAGE" \
+        sh -c "curl -s --path-as-is -o /dev/null -w '%{http_code}' -m 5 'http://$BROKER_HOST/v1%2fpkg'" 2>/dev/null || echo 000)"
+
+    case "$ENCODED" in
+      401|403|503) ok "/v1%2fpkg refuses a caller with no token too ($ENCODED)" ;;
+      200)         bad "/v1%2fpkg answered 200 with NO token — percent-encoding walks straight past the bearer gate, which is unauthenticated command execution on the MCP path. The gate reads the encoded |getPathInfo()| while the router matches the decoded one (see BrokerTokenListener::path)." ;;
+      *)           bad "/v1%2fpkg returned $ENCODED with no token (000 = nothing answered)" ;;
+    esac
+
     WITH_TOKEN="$(docker run --rm --network "$net" -e T="$WW_TOKEN" "$PROBE_IMAGE" \
         sh -c "curl -s -o /dev/null -w '%{http_code}' -m 5 -H \"Authorization: Bearer \$T\" http://$BROKER_HOST/v1/pkg" 2>/dev/null || echo 000)"
 

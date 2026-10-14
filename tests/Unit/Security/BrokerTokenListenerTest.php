@@ -57,6 +57,62 @@ final class BrokerTokenListenerTest extends TestCase
         self::assertNull($lookalike->getResponse(), '/v10 is a different surface and must not be gated by accident');
     }
 
+    /**
+     * `getPathInfo()` is not decoded, and the router decodes: a gate that reads
+     * the encoded form waves `/v1%2fsessions` through while the router hands it
+     * to the sessions controller. The listener must decode the way the router
+     * does — once, with `rawurldecode` — so the two agree on what a `/v1`
+     * request is.
+     */
+    #[DataProvider('encodedV1Paths')]
+    public function test_a_percent_encoded_v1_path_is_gated(string $path): void
+    {
+        $event = $this->event(Request::create($path, 'POST'));
+
+        new BrokerTokenListener('secret')->onKernelRequest($event);
+
+        self::assertNotNull($event->getResponse());
+        self::assertSame(Response::HTTP_UNAUTHORIZED, $event->getResponse()->getStatusCode());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function encodedV1Paths(): iterable
+    {
+        yield 'encoded slash' => ['/v1%2fsessions'];
+        yield 'uppercase encoded slash' => ['/v1%2Fsessions'];
+        yield 'encoded v' => ['/%76%31/sessions'];
+        yield 'encoded prefix and slash' => ['/%76%31%2Fsessions'];
+        yield 'bare encoded' => ['/%76%31'];
+    }
+
+    /**
+     * One decode, not a loop: the router decodes once, so `/v1%252fsessions`
+     * is not a `/v1` request to either of them.
+     */
+    public function test_a_double_encoded_path_is_not_gated_because_routing_would_not_match_it(): void
+    {
+        $event = $this->event(Request::create('/v1%252fsessions'));
+
+        new BrokerTokenListener('secret')->onKernelRequest($event);
+
+        self::assertNull($event->getResponse());
+    }
+
+    /**
+     * Decoding can only widen the gate, never move it off a path the router
+     * would not have matched anyway: an encoding of an open path stays open.
+     */
+    public function test_an_encoding_of_a_public_path_is_not_gated(): void
+    {
+        $event = $this->event(Request::create('/%68ealth'));
+
+        new BrokerTokenListener('secret')->onKernelRequest($event);
+
+        self::assertNull($event->getResponse());
+    }
+
     public function test_a_sub_request_is_not_gated(): void
     {
         $event = $this->event(Request::create('/v1/sessions'), HttpKernelInterface::SUB_REQUEST);
