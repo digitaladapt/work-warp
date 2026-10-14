@@ -18,6 +18,12 @@
 #      read-only and the process has no capabilities, which is why the failure
 #      would be a session's first command dying on a permission error that
 #      looks like a broker bug.
+#   4. **the workspace write cap (`--ulimit fsize`) actually refuses a write.**
+#      A named volume has no size of its own, so this one field is the only
+#      thing bounding how large a single file a command can create — and it is
+#      the kind of setting whose absence has no symptom until a host disk fills.
+#      Checked with a control run first, so the measurement is the flag's doing
+#      rather than the image's.
 #
 # The run in (3) uses the production shape — --read-only, dropped caps,
 # --no-new-privileges, --network none, uid 1000 — so an image that secretly
@@ -219,6 +225,119 @@ if docker run --rm \
 else
     fail "a fresh volume was not writable at /workspace under the production shape"
     note "check that the image ships /workspace owned by 1000:1000 (see ww-base/Dockerfile) and that the daemon populates volumes"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. The workspace write cap: does `--ulimit fsize` actually stop a write?
+#
+# The broker sends this as `HostConfig.Ulimits` (App\Docker\Limits::ulimits),
+# and what the unit suite can assert is the payload, not the effect. This is
+# the effect: a *named volume* has no size of its own and the broker holds no
+# mount of it, so `fsize` is the one limit standing between a runaway command
+# and a full host disk — which makes it worth measuring rather than trusting.
+#
+# `docker run --ulimit` and the broker's `Ulimits` field are the same daemon
+# setting; what is measured here is the daemon's handling of it, on the same
+# mount shape the broker creates.
+# ---------------------------------------------------------------------------
+
+# The control first. If the base image already carried an fsize limit, the run
+# below would prove nothing about the flag — it would be measuring the image.
+# This is the same "a setting with no effect looks identical to a setting that
+# works" trap the classic-builder pin exists for, so it is checked, not assumed.
+control="$(docker run --rm --user 1000:1000 "$IMAGE" bash -c 'ulimit -f' 2>/dev/null || echo 'could not ask')"
+
+if [ "$control" = "unlimited" ]; then
+    pass "with no --ulimit the image's fsize is unlimited, so the cap below is the flag's doing and not the image's"
+else
+    fail "the image already carries an fsize limit ('$control'); the check below would not be measuring the flag"
+fi
+
+# The same named volume section 3 created: a named volume of this shape is
+# exactly what a command container is given, and creating it again is a no-op.
+cleanup_volume="ww-smoke-$$"
+docker volume create "$cleanup_volume" >/dev/null
+
+# 1 MiB, so the numbers in the failure messages are readable.
+if docker run --rm \
+        --init \
+        --read-only \
+        --tmpfs "/tmp:rw,noexec,nosuid,size=64m" \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        --network none \
+        --user 1000:1000 \
+        --ulimit fsize=1048576:1048576 \
+        -v "$cleanup_volume:/workspace" \
+        "$IMAGE" bash -euc '
+    # The limit is in force, it is the one asked for, and it is not "unlimited".
+    # `ulimit -f` is in 512-byte blocks, so a 1 MiB cap reads as 2048 — the
+    # soft limit, which is what a process is actually held to.
+    [ "$(ulimit -f)" = "2048" ] \
+        || { echo "ulimit -f is $(ulimit -f), expected 2048 (1 MiB in 512-byte blocks)"; exit 1; }
+
+    # Under the cap, an ordinary write lands whole. A limit that broke normal
+    # work would be worse than no limit at all.
+    dd if=/dev/zero of=/workspace/under bs=1024 count=512 status=none 2>/dev/null
+    [ "$(stat -c %s /workspace/under)" = "524288" ] \
+        || { echo "a 512 KiB write under a 1 MiB cap did not land whole"; exit 1; }
+
+    # Over it, the write is refused — this is the accident case: a redirect in
+    # a loop, or an install that logs as it goes.
+    if dd if=/dev/zero of=/workspace/over bs=1024 count=4096 status=none 2>/dev/null; then
+        echo "a 4 MiB write succeeded under a 1 MiB cap"; exit 1
+    fi
+
+    # And it stops *at* the cap rather than overshooting it: the kernel refuses
+    # the write that would cross the line, not the one that reaches it.
+    size="$(stat -c %s /workspace/over)"
+    [ "$size" = "1048576" ] \
+        || { echo "the capped file is $size bytes; expected exactly the 1048576 limit"; exit 1; }
+
+    # A limit, not a broken workspace: the directory still works afterwards.
+    dd if=/dev/zero of=/workspace/after bs=1024 count=64 status=none 2>/dev/null
+
+    echo "512 KiB landed, 4 MiB stopped at exactly 1 MiB, and the workspace still writes after"
+'; then
+    pass "the write cap binds: a 1 MiB fsize refuses the 4 MiB write and stops the file at exactly the limit"
+else
+    fail "the write cap did not bind (output above)"
+    note "check that the daemon forwards --ulimit to the container and that the mount is the named volume"
+fi
+
+# Measured, not assumed: `FileSize`'s docblock claims this bounds `write()` and
+# says plainly that `truncate`/`fallocate` do not go through it. Rather than
+# leave that as a comment nobody checked, the two are measured and reported —
+# informational, because an escaping call is the documented behaviour, not a
+# failure. What would be a failure is the claim above being wrong in a way the
+# docblock does not admit.
+if escapes="$(docker run --rm \
+        --read-only \
+        --tmpfs "/tmp:rw,noexec,nosuid,size=64m" \
+        --cap-drop=ALL \
+        --network none \
+        --user 1000:1000 \
+        --ulimit fsize=1048576:1048576 \
+        -v "$cleanup_volume:/workspace" \
+        "$IMAGE" bash -euc '
+    # Three outcomes, not two: a tool that is not in the image must not be
+    # reported as "refused", which would credit the limit for a missing binary.
+    t=refused; a=refused
+    if ! command -v truncate >/dev/null 2>&1; then
+        t=absent
+    elif truncate -s 10M /workspace/sparse 2>/dev/null; then
+        t="ALLOWED, $(stat -c %s /workspace/sparse) bytes apparent"
+    fi
+    if ! command -v fallocate >/dev/null 2>&1; then
+        a=absent
+    elif fallocate -l 10M /workspace/alloc 2>/dev/null; then
+        a="ALLOWED, $(stat -c %s /workspace/alloc) bytes allocated"
+    fi
+    printf "truncate %s; fallocate %s" "$t" "$a"
+' 2>/dev/null)"; then
+    note "beyond write(): $escapes"
+else
+    note "beyond write(): could not measure (the container did not run)"
 fi
 
 # ---------------------------------------------------------------------------

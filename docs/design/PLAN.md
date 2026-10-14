@@ -451,7 +451,8 @@ Three of these cannot be done from inside the sandbox and are blockers:
 
 ## 11. Open questions
 
-- Where does the workspace volume live, and what is its quota policy?
+- ~~Where does the workspace volume live, and what is its quota policy?~~ —
+  **Answered 2026-10-14, and by a limit rather than a quota.** See below.
 - Does the workspace image build on the host (slower, no host toolchain
   dependency but a build daemon per session) or in the command container
   (faster, needs docker in the build)?
@@ -459,6 +460,45 @@ Three of these cannot be done from inside the sandbox and are blockers:
 - Does the session record live in this repo's own store, or in MemoryDraft?
 - Should the ephemeral container be `--network none` for commands that do not
   need the network, and only granted a netns when they do?
+
+**Answered since — the workspace quota, 2026-10-14.**
+
+*What stops a session filling the host filesystem?* **By default, one kernel
+limit — and it is worth stating the arithmetic rather than hiding behind a flag
+name.** A named volume has no size of its own, and every way to give one a real
+byte-cap is a filesystem feature: XFS project quotas, btrfs/zfs, devicemapper.
+Each needs host state — an `mkfs`, a mount option, a pre-created backing file —
+that a `docker compose up` cannot supply, and WorkWarp is meant to come up on a
+stock Docker host. So those stay documented hardening rather than defaults, and
+the honest sentence is this one.
+
+What the default *does* bound is the accident, which is the case that actually
+happens. `--ulimit fsize` (`WW_MAX_FILE_SIZE`, `App\Docker\FileSize`) refuses
+any single file past **5 GiB**, so a redirect in a loop or an install that logs
+as it goes dies with `EFBIG` naming the file instead of filling the disk
+overnight. Soft equals hard, because a command runs as `1000:1000` with every
+capability dropped and a non-root process cannot raise a hard rlimit — nothing
+inside the container can widen it. The worst case is that value times
+`pids_limit` (512): a number anyone can read off a config file, which is the
+whole of the improvement over "nothing at all".
+
+Two things it does not cover are stated in `FileSize` and **measured** in
+`ww-base/smoke.sh` rather than assumed: `truncate`/`fallocate` do not pass
+through `write()`, and it bounds a file rather than the volume. The smoke script
+runs a control container first, so the check is the flag's doing and not the
+image's.
+
+A deployment that wants a real cap has one without host surgery: a workspace
+volume backed by a directory on a chosen device (`docker volume create -d local
+--opt type=none --opt device=… --opt o=bind`), plus XFS `pquota` where the
+storage already has it.
+
+**Not fixed here, so it is not assumed away: volumes accumulate.**
+`POST /v1/sessions` creates `ww-ws-<session>` and nothing removes it — the
+janitor deliberately will not (deleting a named workspace is "a sweep that could
+delete someone's work"), and `DELETE /v1/sessions` removes it only when asked. A
+stranger who spins this up, pokes it and walks away leaves volumes behind. That
+is a leak rather than a limit, and it is filed separately.
 
 ---
 
@@ -538,4 +578,5 @@ the task-loom e2e in §9 becomes a normal operation rather than a manual one.
 | 2026-10-13 | The session surface is complete: `GET /v1/sessions` (from the `ww.kind=workspace` label, never a name prefix), `GET /v1/sessions/{name}`, `GET .../ps`, and `DELETE /v1/sessions/{name}`. `delete_session`'s `keep_workspace` is **all-or-none** — every volume or none — because a finer split would hide irreversible deletion behind a flag whose name reads as preservation. The deletion order is a dependency order: containers (with `v=1`), then the network, then the other volumes, the workspace **last**, so every step that can refuse gets its chance before the irreversible one. `DELETE` of a missing session is `404`, not a triumphant no-op. |
 | 2026-10-13 | The **ledger *read*** is a disposable container, exactly like its write: the ledger lives inside the workspace volume and the broker has no mount of it, so `SessionLedger` reads it the way `LedgerWriter` writes it — same constraints, same image. Best-effort by the same rule: a read that cannot happen is `null` beside a truthful container list, never a 5xx. |
 | 2026-10-13 | The MCP surface (`/v1/mcp`, step 5) sits **under `/v1` so the bearer gate applies** — an MCP endpoint outside the gate would be unauthenticated remote command execution. Its tools are thin calls into the objects that already own the operations, with one error-translation point so the broker's own refusal sentences reach the model instead of the SDK's generic internal error. The package manifest (`ww://pkg`, `GET /v1/pkg`) is generated from the same tool catalogue the server is built from, so it cannot drift. |
+| 2026-10-14 | `WW_MAX_FILE_SIZE` bounds the **workspace** rather than the process — the one limit no other field covers, since the workspace is a mount and a mount is where writing is the point. A real byte-cap needs host filesystem state (`mkfs`, a mount option) that `docker compose up` cannot supply, so the default is an `RLIMIT_FSIZE` (`App\Docker\FileSize`), soft equal to hard so nothing inside the container can raise it, at 5 GiB. `truncate`/`fallocate` are named as escapes in the class and **measured** in `ww-base/smoke.sh` — with a control run, so the check is the flag's doing and not the image's — rather than assumed. Command containers only: a stack service's database growing past any particular size is behaving correctly, and the build endpoint carries no `HostConfig` at all. |
 | 2026-10-12 | The compose harness is a **typed stack vocabulary the broker executes itself** (`POST /v1/sessions/{name}/stack`), not a runner for caller-supplied compose files: a compose file expresses `privileged`, host binds, devices and host namespaces, and validating one would be filtering. Compose's own machinery (`-p` label scoping, `config` validation of a rendered file) is a proven and named upgrade path for the *executor* — the caller-facing vocabulary is the gate either way. Stack services get the **second containment class** (no `CapDrop`/read-only rootfs/fixed uid — real service images break under them) with named-volume-only mounts, `no-new-privileges`, limits and the session network; the difference is asserted in `StackContainerSpecTest`. |

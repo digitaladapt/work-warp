@@ -130,6 +130,13 @@ services:
       WW_MAX_CONCURRENCY: "4"
       WW_TTL_GRACE: "300"
       WW_JANITOR_INTERVAL: "60"
+      # The largest file a single command may write, as `RLIMIT_FSIZE`. A named
+      # volume has no size of its own, so this is the only limit standing
+      # between a command that loops with a redirect in it and a full host
+      # disk. Raise it for a session that genuinely needs a large artifact;
+      # "unlimited" removes it, and `App\Docker\FileSize` documents what that
+      # costs. Composed only — never set from a request.
+      WW_MAX_FILE_SIZE: "5G"
     # Bounded like the proxy: this container holds the Docker credential, so a
     # memory or fork bomb here is the worst place to have one.
     mem_limit: 512m

@@ -81,6 +81,16 @@ final class ContainerSpec
                 'Tmpfs' => $limits->tmpfs,
 
                 'PidsLimit' => $limits->pidsLimit,
+
+                // The one limit aimed at the *workspace* rather than at the
+                // process. Everything above bounds what the command may
+                // consume; the workspace is a mount, and a mount is the one
+                // place writing is the point — so a redirect in a loop is
+                // bounded here instead (`FileSize`). Absent when the cap is
+                // configured off, because `Ulimits: []` and no key mean the
+                // same thing to the daemon and one of them is honest.
+                'Ulimits' => $limits->ulimits(),
+
                 'Memory' => $limits->memoryBytes,
                 'NanoCpus' => $limits->nanoCpus,
 

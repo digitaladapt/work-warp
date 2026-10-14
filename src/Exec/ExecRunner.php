@@ -7,6 +7,7 @@ namespace App\Exec;
 use App\Docker\ContainerSpec;
 use App\Docker\DockerApi;
 use App\Docker\DockerException;
+use App\Docker\FileSize;
 use App\Docker\Labels;
 use App\Docker\Limits;
 use App\Session\NoSuchSession;
@@ -69,6 +70,18 @@ final class ExecRunner
         private readonly ClockInterface $clock,
         private readonly string $image,
         private readonly int $ttlGrace,
+        /**
+         * The cap on any one file a command may write.
+         *
+         * Required, not defaulted: the composition root always has an answer
+         * (parsed from `WW_MAX_FILE_SIZE`, defaulting to `5G`), and a default
+         * here would be a second place for the value to live — one of which
+         * would be the permissive one eventually. A value object rather than a
+         * nullable int, because "no cap" has to stay expressible and
+         * distinguishable from "not configured". `FileSize` carries the
+         * `FileSize`'s reasoning for the limit itself.
+         */
+        public readonly FileSize $maxFileSize,
     ) {
     }
 
@@ -208,12 +221,16 @@ final class ExecRunner
     }
 
     /**
-     * The one limits field that is configuration today (`WW_TTL_GRACE`); the
-     * rest is policy defaulted in `Limits` itself.
+     * The two limits fields that are configuration rather than policy
+     * (`WW_TTL_GRACE`, `WW_MAX_FILE_SIZE`); the rest is defaulted in `Limits`
+     * itself.
      */
     private function limits(): Limits
     {
-        return new Limits(ttlGrace: $this->ttlGrace);
+        return new Limits(
+            ttlGrace: $this->ttlGrace,
+            maxFileSizeBytes: $this->maxFileSize->bytes,
+        );
     }
 
     /**

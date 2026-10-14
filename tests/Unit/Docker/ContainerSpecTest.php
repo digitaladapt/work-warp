@@ -31,9 +31,59 @@ final class ContainerSpecTest extends TestCase
         self::assertSame(
             [
                 'Init', 'AutoRemove', 'CapDrop', 'SecurityOpt', 'ReadonlyRootfs', 'Tmpfs',
-                'PidsLimit', 'Memory', 'NanoCpus', 'NetworkMode', 'Binds', 'StopTimeout', 'User',
+                'PidsLimit', 'Ulimits', 'Memory', 'NanoCpus', 'NetworkMode', 'Binds', 'StopTimeout', 'User',
             ],
             array_keys($this->payload(ExecRequest::fromArray(['cmd' => ['true']]))['HostConfig']),
+        );
+    }
+
+    /**
+     * The workspace cap reaches the daemon as `RLIMIT_FSIZE`, soft and hard the
+     * same. The hard one is the load-bearing half: a hard limit above the soft
+     * one would let the process raise its own soft limit, and the whole point
+     * is that nothing inside the container can widen this.
+     */
+    public function test_the_file_size_cap_is_sent_as_a_matching_soft_and_hard_rlimit(): void
+    {
+        $hostConfig = $this->payload(
+            ExecRequest::fromArray(['cmd' => ['true']]),
+            limits: new Limits(maxFileSizeBytes: 500 * 1024 ** 2),
+        )['HostConfig'];
+
+        self::assertSame(
+            [['Name' => 'fsize', 'Soft' => 500 * 1024 ** 2, 'Hard' => 500 * 1024 ** 2]],
+            $hostConfig['Ulimits'],
+            'the soft limit must equal the hard limit, or the process can raise it',
+        );
+    }
+
+    /**
+     * "Unlimited" is expressed by sending nothing, not by sending a zero: the
+     * kernel reads a soft limit of zero as "no writes at all", which is the
+     * opposite of what the word asks for.
+     */
+    public function test_an_uncapped_workspace_is_an_empty_ulimits_list_not_a_zero(): void
+    {
+        $hostConfig = $this->payload(
+            ExecRequest::fromArray(['cmd' => ['true']]),
+            limits: new Limits(maxFileSizeBytes: null),
+        )['HostConfig'];
+
+        self::assertSame([], $hostConfig['Ulimits']);
+    }
+
+    /**
+     * The default is a cap, not the absence of one: a `Limits` nobody
+     * configured is still bounded, so a surface that forgets cannot silently
+     * hand out an unbounded workspace.
+     */
+    public function test_the_default_limits_carry_a_file_size_cap(): void
+    {
+        $hostConfig = $this->payload(ExecRequest::fromArray(['cmd' => ['true']]))['HostConfig'];
+
+        self::assertSame(
+            [['Name' => 'fsize', 'Soft' => 5 * 1024 ** 3, 'Hard' => 5 * 1024 ** 3]],
+            $hostConfig['Ulimits'],
         );
     }
 
@@ -220,14 +270,14 @@ final class ContainerSpecTest extends TestCase
     /**
      * @return array<string, mixed>
      */
-    private function payload(ExecRequest $request, string $image = 'digitaladapt/work-warp:test-base'): array
+    private function payload(ExecRequest $request, string $image = 'digitaladapt/work-warp:test-base', ?Limits $limits = null): array
     {
         return ContainerSpec::payload(
             $image,
             SessionName::from('demo'),
             $request,
             'ww-ws-demo',
-            Limits::defaults(),
+            $limits ?? Limits::defaults(),
         );
     }
 }

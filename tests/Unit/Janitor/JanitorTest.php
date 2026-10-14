@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Unit\Janitor;
 
 use App\Docker\DockerRefused;
+use App\Docker\FileSize;
 use App\Docker\Labels;
 use App\Exec\ExecRunner;
 use App\Exec\Slots;
@@ -210,7 +211,7 @@ final class JanitorTest extends TestCase
 
         $held = $slots->reserve();
 
-        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
+        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300, FileSize::default());
         $janitor = new Janitor($docker, new LedgerWriter($runner, new NullLogger(), $clock), new NullLogger(), $clock);
 
         $docker->createVolume('ww-ws-demo', ['ww.session' => 'demo']);
@@ -284,7 +285,7 @@ final class JanitorTest extends TestCase
         $clock = new FakeClock();
         $slots = Slots::of(2, new InMemoryStore());
 
-        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300);
+        $runner = new ExecRunner($docker, $slots, new NullLogger(), $clock, 'digitaladapt/work-warp:test-base', 300, FileSize::default());
         $ledger = new LedgerWriter($runner, new NullLogger(), $clock);
         $janitor = new Janitor($docker, $ledger, new NullLogger(), $clock);
 
