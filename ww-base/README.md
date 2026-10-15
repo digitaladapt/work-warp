@@ -50,7 +50,8 @@ curl, wget and ca-certificates, openssl, jq, less, file, rsync, the archive
 family (tar, gzip, bzip2, xz, zstd, zip, unzip), make, patch, diffutils,
 Python 3 with the full standard library and `venv` — not `python3-minimal`,
 which lacks `http`, `sqlite3` and `ctypes` and cannot even make a venv —
-iproute2, dig, ping, procps, bc, xxd.
+iproute2, dig, ping, netcat-openbsd, traceroute, procps, lsof, psmisc,
+sqlite3, bc, xxd.
 
 Deliberately not inside: `sudo` (capabilities are dropped to `ALL` and
 `no-new-privileges` is set — there is nothing to gain), an editor (the capture
