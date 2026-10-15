@@ -112,6 +112,27 @@ This is the finding that decides the design, and it is not about hooks at all:
 **if the client can name the destination, the client can choose the destination.**
 No amount of hook-skipping fixes that, because there is no hook involved.
 
+**Extended, same day: an explicitly-passed URL is rewritten too.** The open
+question in §7 listed it; `bin/probe-git-push.sh` (§10) answers it. Given a
+repository with *no remote at all* — so nothing can be attributed to remote-name
+resolution — and one line of config:
+
+```
+$ git config url."/scratch/evil.git".insteadOf "/scratch/good.git"
+$ git push --no-verify /scratch/good.git HEAD:refs/heads/a
+To /scratch/evil.git
+ * [new branch]      HEAD -> a          # and /scratch/good.git never sees it
+```
+
+The URL that was actually named is not consulted. This is the load-bearing detail
+for anyone tempted by the cheap route: a guard built on `-c url.<good>.insteadOf=`
+is **not** a guard, because the repository's own rules are merged with it and the
+longest match still wins. The same defeats the cheapest idea of all, an empty
+`-c remote.origin.pushurl=` to void a shadowing pushurl: with no rule present the
+empty pushurl already falls back to the remote's url, which lands at the rewrite
+target — and a *non-empty* override does not replace the shadowed pushurl at all,
+it fans out to both destinations. Measured, all of it, in the same probe.
+
 ---
 
 ## 4. The shape
@@ -140,8 +161,11 @@ The broker does four things the client cannot do, and each one closes a finding
 from §3:
 
 1. **It supplies the destination URL itself.** The client's remotes and the
-   client's `url.*.insteadOf` are never consulted. That is the fix for §3.2, and
-   it is a fix by construction rather than by checking.
+   client's `url.*.insteadOf` are never consulted. That is the fix for §3.2, and it
+   is a fix by construction rather than by checking — which matters more than it
+   first looked, because §10 measured that the rewrite rule applies to an
+   *explicitly-passed* URL as well. There is no override flag that declines it; the
+   only way to not be rewritten is to not read the config.
 2. **It pushes from a tree it controls, not from the workspace's `.git`.** The
    broker makes a scratch clone of the revision being pushed, with
    `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointed at `/dev/null` and a repo
@@ -243,23 +267,14 @@ unexpressible, and a hook path that is skipped rather than trusted.
 ## 7. Untested, and therefore not claimed
 
 Stated plainly, because the rest of this document is measured and these lines are
-not:
+not. Questions that *were* open here have since been measured and now live in §10
+alongside the probe's other findings.
 
-1. **Whether `url.*.insteadOf` rewrites an explicitly-passed URL, and not only a
-   remote name.** §3.2 measured the remote-name case. The fix in 4.2 does not
-   depend on the answer — it stops consulting the workspace's config altogether —
-   but anyone who tries the cheaper `-c remote.origin.pushurl=<url>` override
-   *is* depending on it, and should measure before relying.
-2. **Whether a scratch clone can push what the workspace has not pushed.** The
-   clone has to carry the objects for the revision being pushed; whether it is
-   cheaper to clone locally with `--reference`, or to push from the workspace
-   with every repo-local key overridden, is an implementation question with a
-   measurable answer.
-3. **The forge's own behaviour on the far side** — whether the deploy key can
+1. **The forge's own behaviour on the far side** — whether the deploy key can
    create a branch, what the pre-receive hook says when it refuses, and what the
    compare URL looks like. None of this was exercised: the measurements above all
    used a local bare repository as the remote.
-4. **Timeouts.** An MCP request against `/v1/mcp` idle-timed-out during this
+2. **Timeouts.** An MCP request against `/v1/mcp` idle-timed-out during this
    session's testing. A push is slower than a `git ls-remote`, the broker owns
    the deadline (DOCKER-ACCESS.md §5), and a call that times out may have pushed
    the ref or not — so the report has to admit *both* rather than guess.
@@ -290,3 +305,47 @@ is not lost, without claiming a decision that has not been made.
 | 2026-10-15 | Git access is a single `push_branch` tool backed by a broker-held, push-scoped credential. The ssh-key route is rejected on PLAN.md §2.2's own terms: it re-introduces the condition WorkWarp was built to remove. |
 | 2026-10-15 | The destination is the broker's to choose, not the client's. Measured: a repo-local `url.*.insteadOf` redirects a push named `origin`, and `--no-verify` does not prevent it — so the URL is not a field, and the workspace's `.git/config` is not trusted input. |
 | 2026-10-15 | Hooks are skipped (`--no-verify`) *and* made unreachable (a scratch clone). Measured: a `pre-push` hook runs under the push's credential and reads it. |
+| 2026-10-15 | The `-c` overrides are rejected as guards. Measured (§10): a repo-local rule rewrites an *explicitly-passed* URL, so `-c url.<good>.insteadOf=` cannot cancel it; and `-c remote.origin.pushurl=` either fans out to both destinations or falls back to a url that is itself rewritten. The broker must not read the workspace's config. |
+| 2026-10-15 | The scratch-clone shape is confirmed rather than assumed. Measured (§10): a `--no-local` clone carries an unpushed revision's objects, inherits no `url.*` rule, and cannot reach the workspace's hooks — so `--no-verify` in 4.2 point 4 is belt-and-braces, not the mechanism. |
+
+---
+
+## 10. The probe
+
+`bin/probe-git-push.sh` measures §3's claims and the questions §7 used to carry. It
+is cheap, self-contained and safe to re-run: everything happens inside a scratch
+directory of local bare repositories and nothing contacts the forge. A clean pass
+exits 0 and prints the verdict the claims above rest on; a check that measures
+differently exits 1 and keeps the scratch for inspection; a check that could not be
+made at all exits 2 and counts as unknown, never as a pass.
+
+What it settled:
+
+1. **`url.*.insteadOf` rewrites an explicitly-passed URL, not only a remote name**
+   (§3.2). The cheap `-c remote.origin.pushurl=<url>` guard is therefore a dead end,
+   and 4.2's "supply the URL ourselves, from a config we wrote" is doing real work.
+2. **A scratch clone carries what the workspace has not pushed, and inherits nothing
+   that matters.** The clone carries the unpushed revision's objects itself, inherits
+   no `url.*` rule, and never runs the workspace's hooks; a push from it lands where
+   it is told. `--reference` variants behave the same way, so the cheaper form is
+   available if copying objects ever matters — note `git clone --reference <src>
+   <src> <dst>` (the source appears twice) still contacts the source to fetch refs,
+   so "no local transport" and "borrow objects" are not the same request.
+
+And one trap, recorded because it produced a *wrong* answer before it produced the
+right one:
+
+3. **The scratch directory must admit execution.** `pre-push` is a gate only if the
+   hook file can be executed, and git silently ignores a hook it cannot run. The
+   first draft of the probe ran its scratch in the command container's `/tmp` —
+   `tmpfs rw,nosuid,nodev,noexec` — and duly reported "a hook in the clone did not
+   stop the push". The hook was fine; the filesystem was `noexec`. Re-measuring
+   under a probe that checks for an exec-capable scratch showed the hook *does* stop
+   the push (and that without `--no-verify` the ref is never created), which is what
+   makes 4.2 point 4 load-bearing for the broker's own clone too.
+
+The probe now refuses to measure rather than measure that: a verdict that can be
+wrong because of the filesystem the probe chose is worse than no probe, so the
+`can_exec_in` guard is the point of this section and not a footnote to it.
+
+Not measured here, still §7's: anything on the far side of the forge.
