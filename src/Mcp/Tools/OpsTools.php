@@ -97,13 +97,13 @@ final class OpsTools
         string $action,
         ?array $services = null,
         ?int $timeout = null,
-        bool $keepVolumes = false,
+        bool $keep_volumes = false,
     ): array {
         $request = StackRequest::fromArray([
             'action' => $action,
             'services' => $services ?? [],
             'timeout' => $timeout,
-            'keep_volumes' => $keepVolumes,
+            'keep_volumes' => $keep_volumes,
         ]);
 
         $name = SessionName::from($session);

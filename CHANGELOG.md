@@ -14,8 +14,58 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   scratch build runs in a broker-launched container with the classic builder
   pinned — each of those was built and is asserted in tests, but §11 still
   presented them as open. They are now recorded as answers with the behaviour
-  that answers them. What is genuinely still open is the workspace volume's
-  **quota policy**: nothing stops a session filling the host filesystem today.
+  that answers them. The workspace volume's **quota policy** was the fifth, and
+  it is now answered too — see "Added (the workspace write cap)" below — so
+  §11 holds no undecided item that code does not already settle.
+
+### Fixed
+
+- **Three MCP tools threw on every call, and a fourth was quietly doing the
+  wrong thing.** `get_session`, `ps` and `delete_session` could not be called at
+  all: each ended in ``Missing required argument `name` `` before its handler was
+  reached. The cause was one mismatch repeated four times — the JSON Schema
+  advertised the session as `session`, while the PHP method declared it as
+  `$name` — and the SDK resolves a call by matching each argument to a
+  *parameter of the same name* (`ReferenceHandler::prepareArguments()` reads
+  `$arguments[$parameter->getName()]`, with no mapping layer between the wire
+  name and the PHP name). What a caller saw was a protocol-level failure rather
+  than a tool error, which is why it read as "these three are broken" instead of
+  "these three got an argument nothing was looking for".
+
+  **`delete_session` was the dangerous one, and it did not throw.** Its
+  `keep_workspace` argument had the same mismatch — the parameter was
+  `$keepWorkspace` — but because that parameter has a default, the SDK dropped
+  the argument instead of refusing it. So `delete_session {"keep_workspace":
+  true}`, the spelling `README.md` tells a caller to use, the one the HTTP
+  endpoint accepts, and the one this file used, succeeded and **destroyed the
+  workspace it was asked to keep**, reporting `workspace_removed: true` while
+  doing it. Silent wrong is worse than loud broken, and it is why this is a bug
+  report rather than a papercut. `stack`'s `keep_volumes` had the same defect
+  and the same silence; the other seven tools were sound.
+
+  The fix renames the parameters to the names the schema already advertised,
+  which is the direction this project commits to: snake_case is the wire format
+  and the documentation, both surfaces already agree on it, and the alternative —
+  changing the schema and `README.md` to camelCase — would have been a breaking
+  change to a published argument in order to preserve a PHP private. Each renamed
+  parameter now says why it is spelled that way, because the naming reads as a
+  style slip to anyone who does not know the dispatch rule.
+
+  **Two tests, because reading the code is what missed this.**
+  `ToolArgumentNamesTest` reflects the catalogue and asserts that each tool's
+  schema and its handler name the same arguments, in both directions: an
+  advertised argument with no matching parameter is a flag the broker cannot see,
+  and a parameter with no advertised argument is one no caller can supply. It
+  works from the catalogue rather than a hand-written list, so a tool added later
+  is covered without being named, and it failed on all four before the fix,
+  naming the cause in each message.
+
+  `McpApiTest` now *calls* the three tools, and asserts the `keep_workspace` case
+  against Docker's state rather than the tool's own report — because the report is
+  exactly what a caller cannot check. That gap is the whole story: the suite
+  proved `tools/call` worked, but the only call it made was `quick_command`, the
+  one command tool whose parameter names happen to match its schema, and the same
+  reason "create a session and run a command" worked while the rest did not.
 
 ### Security
 
@@ -37,6 +87,61 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   blind spot and now measures `/v1%2fpkg` alongside `/v1/pkg`: it asked whether
   the gate covered `/v1` only in the spelling a client happens to use, so it
   would have reported the gate as working on a broker that was wide open.
+
+### Added (the workspace write cap, 2026-10-14)
+
+- **`WW_MAX_FILE_SIZE` — the workspace gets a limit, and it is the first one
+  aimed at the workspace rather than at the process.** `Memory` and `NanoCpus`
+  bound the process, `PidsLimit` bounds its forks, the root filesystem is
+  read-only and its only writable path is a 64 MiB tmpfs — and none of them
+  bound the workspace, because the workspace is a mount and a mount is the one
+  place writing is the point. A command that loops with a redirect in it, the
+  ordinary accident rather than an interesting attack, could fill the host until
+  something else on it stopped working.
+
+  A real byte-cap on a volume is a filesystem feature — XFS project quotas,
+  btrfs/zfs, devicemapper — and every one of them needs host state (`mkfs`, a
+  mount option, a pre-created backing file) that `docker compose up` cannot
+  supply. This broker is meant to come up on a stock Docker host, so the limit
+  is instead `RLIMIT_FSIZE`: one `HostConfig` field, no host setup, enforced by
+  the kernel against the writer. `App\Docker\FileSize` parses the configured
+  value (a whole number with an optional `k/m/g/t` suffix, or `unlimited`); the
+  default is **5 GiB**.
+
+  Four decisions worth naming, because each is a place a limit quietly stops
+  existing:
+
+  - **Soft equals hard.** A hard limit above the soft one would let a process
+    raise its own soft limit, and a command runs as `1000:1000` with every
+    capability dropped precisely so nothing inside the container can widen this.
+    `ContainerSpecTest` asserts the two match, since that is the load-bearing
+    half.
+  - **An empty value takes the default rather than removing the cap.** The two
+    mistakes are not symmetrical: 5 GiB when unlimited was meant is a loud
+    `EFBIG` naming the file; unlimited when the default was meant is a full disk
+    and no clue which command did it. The permissive reading does not win by
+    accident.
+  - **A typo is a broker that refuses to start**, not a first command that
+    quietly ran unbounded — parsed once at boot from a service factory, so `0`,
+    `1.5G` and `5x` fail the compile with the value named.
+  - **Command containers only.** A stack service's database growing past any
+    particular size is behaving correctly, so capping it would break the case
+    that surface exists for; and the build endpoint carries no `HostConfig` at
+    all. Choices, not oversights.
+
+  What it does **not** do is stated rather than glossed, and measured rather
+  than assumed: `truncate` and `fallocate` do not pass through `write()`, so `FileSize`
+  names them as escapes and `ww-base/smoke.sh` probes for them — behind a control
+  run first, so the check is the flag's doing and not the image's. It bounds a
+  *file*, not the volume (worst case 5 GiB x `pids_limit`, 512), which does not
+  cap the disk but does turn an overnight catastrophe into two numbers anyone can
+  read off a config file.
+
+  **Still open, and filed separately as #27:** volumes accumulate.
+  `POST /v1/sessions` creates `ww-ws-<session>` and nothing removes it — the
+  janitor deliberately will not, and `DELETE /v1/sessions` removes it only when
+  asked. A leak rather than a limit, and one with no symptom until a host is full
+  of workspaces nobody asked to keep.
 
 ### Added
 
