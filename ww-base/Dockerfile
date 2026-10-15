@@ -86,10 +86,17 @@ ENV LANG=C.UTF-8
 #                                       tool this image would otherwise be
 #                                       missing
 #   iproute2 bind9-dnsutils iputils-ping  network diagnosis for the session
-#                                       network, when a command is allowed on
-#                                       it
+#       netcat-openbsd traceroute       network, when a command is allowed on
+#                                       it — ping and dig say a host answers;
+#                                       nc and traceroute say a port does,
+#                                       and where the path stops answering
 #   procps coreutils findutils          process and file inspection
-#       grep sed gawk
+#       grep sed gawk psmisc lsof        lsof: which process holds a file;
+#                                       psmisc: pkill, pstree, fuser
+#   sqlite3                             reading a SQLite database from a shell,
+#                                       as jq reads JSON — the python3 module
+#                                       reads one from a script; this reads one
+#                                       from a command line
 #   bash bash-completion                a real shell for scripts
 #   bc xxd                              arithmetic and byte-level inspection
 #
@@ -121,15 +128,20 @@ RUN apt-get update \
         diffutils \
         python3 \
         python3-venv \
+        sqlite3 \
         iproute2 \
         bind9-dnsutils \
         iputils-ping \
+        netcat-openbsd \
+        traceroute \
         procps \
         coreutils \
         findutils \
         grep \
         sed \
         gawk \
+        psmisc \
+        lsof \
         bash \
         bash-completion \
         bc \

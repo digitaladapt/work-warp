@@ -144,7 +144,8 @@ if docker run --rm "$IMAGE" bash -euc '
     [ "$(id -u)" = "1000" ] || { echo "running as uid $(id -u), expected 1000"; exit 1; }
 
     for t in bash git curl wget openssl jq less file rsync unzip zip zstd xz bzip2 tar gzip \
-             make patch diff python3 ip dig ping ps stat sed awk grep find bc xxd; do
+             make patch diff python3 sqlite3 ip dig ping ps stat sed awk grep find bc xxd \
+             nc traceroute lsof pkill pstree; do
         command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }
     done
 

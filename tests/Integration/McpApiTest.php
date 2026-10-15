@@ -217,6 +217,164 @@ final class McpApiTest extends WebTestCase
         self::assertContains('run_command', array_column($body['tools'], 'name'));
     }
 
+    /**
+     * `get_session` and `ps` both name the session `session` in their schema, and
+     * both used to take a parameter called `$name`.
+     *
+     * The SDK resolves a call by matching each JSON argument to a parameter of the
+     * same name (`ReferenceHandler::prepareArguments()`), so neither tool had any
+     * way to be called: the argument filled nothing, `$name` had no default, and
+     * the SDK raised "Missing required argument `name`" before either handler was
+     * entered. Reported as three tools that always threw; `delete_session` was the
+     * third, and `stack` was carrying the same mismatch as a silent flag rather
+     * than a throw.
+     *
+     * This is the test that would have caught it, and its absence is the whole
+     * story of the bug: every other tool was exercised, but the only `tools/call`
+     * in this file used `quick_command` — the one command tool whose parameter
+     * names happen to match its schema.
+     */
+    #[DataProvider('readingTools')]
+    public function test_reading_a_tool_that_names_its_session_argument(string $tool): void
+    {
+        $client = self::createClient();
+        $docker = $this->docker();
+        $docker->createVolume('ww-ws-demo', $this->workspaceLabels('demo'));
+
+        $sessionId = $this->initialize($client);
+        $docker->resetCalls();
+
+        $this->call($client, $sessionId, 'tools/call', [
+            'name' => $tool,
+            'arguments' => ['session' => 'demo'],
+        ], 'call');
+
+        $body = $this->jsonRpc($client);
+
+        // Before the fix the answer was not even a tool error — the SDK failed
+        // while preparing the call, so the caller got a protocol-level refusal
+        // naming an argument that appears nowhere in the schema.
+        self::assertArrayNotHasKey('error', $body, 'the call never reached the handler');
+        self::assertFalse($body['result']['isError'] ?? true, 'a session that exists is not an error');
+
+        // The handler ran: it resolved the session, which means it queried the
+        // daemon for the workspace volume rather than failing on a missing
+        // argument first.
+        self::assertContains('volumeExists', $docker->calledMethods(), 'the argument reached the handler as the session');
+    }
+
+    public function test_get_session_describes_the_session_it_was_asked_about(): void
+    {
+        $client = self::createClient();
+        $docker = $this->docker();
+        $docker->createVolume('ww-ws-demo', $this->workspaceLabels('demo'));
+        $docker->seedContainer('c1', 'ww-demo-web', true, 1_700_000_000, $this->commandLabels('demo', 'web'));
+
+        $sessionId = $this->initialize($client);
+
+        $this->call($client, $sessionId, 'tools/call', [
+            'name' => 'get_session',
+            'arguments' => ['session' => 'demo'],
+        ], 'call');
+
+        $decoded = $this->toolResult($client);
+
+        self::assertSame('demo', $decoded['session'], 'the argument reached the handler as the session');
+        self::assertSame('ww-ws-demo', $decoded['workspace']);
+        self::assertSame(['ww-demo-web'], array_column($decoded['containers'], 'name'));
+        self::assertArrayHasKey('ledger', $decoded, 'the ledger is reported, even when it is null');
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function readingTools(): iterable
+    {
+        yield 'get_session' => ['get_session'];
+        yield 'ps' => ['ps'];
+    }
+
+    public function test_ps_returns_the_containers_the_session_owns(): void
+    {
+        $client = self::createClient();
+        $docker = $this->docker();
+        $docker->createVolume('ww-ws-demo', $this->workspaceLabels('demo'));
+        $docker->seedContainer('c1', 'ww-demo-web', true, 1_700_000_000, $this->commandLabels('demo', 'web'));
+        $docker->seedContainer('c2', 'ww-other-web', true, 1_700_000_000, $this->commandLabels('other'));
+
+        $sessionId = $this->initialize($client);
+
+        $this->call($client, $sessionId, 'tools/call', [
+            'name' => 'ps',
+            'arguments' => ['session' => 'demo'],
+        ], 'call');
+
+        $body = $this->jsonRpc($client);
+        $containers = json_decode($body['result']['content'][0]['text'] ?? '', true, flags: \JSON_THROW_ON_ERROR);
+
+        self::assertSame(['ww-demo-web'], array_column($containers, 'name'), 'membership is the label, never the name');
+        self::assertSame('cmd', $containers[0]['kind']);
+    }
+
+    /**
+     * The optional-argument half of the same bug, and the one that used to fail
+     * *silently* rather than loudly.
+     *
+     * `delete_session` advertised `keep_workspace` and README.md documented it as
+     * the way to keep a session's volumes, but the parameter behind it was named
+     * `$keepWorkspace`. `prepareArguments` finds no `keep_workspace` parameter,
+     * leaves it out, and the parameter falls back to its `false` default — so the
+     * call succeeded and destroyed the workspace the caller had asked to keep.
+     *
+     * Asserted against Docker's state rather than the report, because the report
+     * is what a caller cannot check: `workspace_removed` said `true` and was
+     * believed. The volume still existing is the thing that matters.
+     */
+    public function test_deleting_over_mcp_with_keep_workspace_actually_keeps_it(): void
+    {
+        $client = self::createClient();
+        $docker = $this->docker();
+        $docker->createVolume('ww-ws-demo', $this->workspaceLabels('demo'));
+        $docker->createNetwork('ww-net-demo', $this->workspaceLabels('demo'));
+
+        $sessionId = $this->initialize($client);
+
+        $this->call($client, $sessionId, 'tools/call', [
+            'name' => 'delete_session',
+            'arguments' => ['session' => 'demo', 'keep_workspace' => true],
+        ], 'call');
+
+        $body = $this->jsonRpc($client);
+        $decoded = json_decode($body['result']['content'][0]['text'] ?? '', true, flags: \JSON_THROW_ON_ERROR);
+
+        self::assertFalse($decoded['workspace_removed'], 'the tool was asked to keep the workspace');
+        self::assertSame([], $decoded['volumes_removed']);
+        self::assertTrue($docker->hasVolume('ww-ws-demo'), 'the workspace volume must survive the call');
+    }
+
+    /**
+     * ...and the default still destroys, so the fix did not invert the tool.
+     */
+    public function test_deleting_over_mcp_without_the_flag_still_destroys_the_workspace(): void
+    {
+        $client = self::createClient();
+        $docker = $this->docker();
+        $docker->createVolume('ww-ws-demo', $this->workspaceLabels('demo'));
+
+        $sessionId = $this->initialize($client);
+
+        $this->call($client, $sessionId, 'tools/call', [
+            'name' => 'delete_session',
+            'arguments' => ['session' => 'demo'],
+        ], 'call');
+
+        $body = $this->jsonRpc($client);
+        $decoded = json_decode($body['result']['content'][0]['text'] ?? '', true, flags: \JSON_THROW_ON_ERROR);
+
+        self::assertTrue($decoded['workspace_removed']);
+        self::assertFalse($docker->hasVolume('ww-ws-demo'), 'nothing survives without keep_workspace');
+    }
+
     #[DataProvider('gatedPaths')]
     public function test_every_package_path_needs_the_token(string $method, string $path): void
     {
@@ -339,6 +497,44 @@ final class McpApiTest extends WebTestCase
         $decoded = json_decode((string) $client->getResponse()->getContent(), true, flags: \JSON_THROW_ON_ERROR);
 
         return $decoded;
+    }
+
+    /**
+     * The JSON a tool returned, decoded out of the MCP result envelope.
+     *
+     * @return array<string, mixed>
+     */
+    private function toolResult(KernelBrowser $client): array
+    {
+        $body = $this->jsonRpc($client);
+        $text = $body['result']['content'][0]['text'] ?? '';
+
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode((string) $text, true, flags: \JSON_THROW_ON_ERROR);
+
+        return $decoded;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function workspaceLabels(string $session): array
+    {
+        return ['ww.created-by' => 'work-warp', 'ww.session' => $session, 'ww.kind' => 'workspace'];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function commandLabels(string $session, ?string $service = null): array
+    {
+        $labels = ['ww.created-by' => 'work-warp', 'ww.session' => $session, 'ww.kind' => 'cmd'];
+
+        if (null !== $service) {
+            $labels['ww.service'] = $service;
+        }
+
+        return $labels;
     }
 
     private function docker(): ScriptedDockerApi
