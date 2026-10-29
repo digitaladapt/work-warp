@@ -146,7 +146,6 @@ RUN apt-get update \
         bash-completion \
         bc \
         xxd \
-        taskwarrior \
     && rm -rf /var/lib/apt/lists/*
 
 # uid 1000:gid 1000 — the number the broker passes explicitly as the
